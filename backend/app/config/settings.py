@@ -33,6 +33,11 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./jarvis.db"
 
+    # Placeholders only — unused until file 05 (Gemini) / 07 (Ollama fallback).
+    # Declared now so .env.example is complete from day one (see 01-project-foundation.md).
+    gemini_api_key: str | None = None
+    ollama_base_url: str = "http://localhost:11434"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
