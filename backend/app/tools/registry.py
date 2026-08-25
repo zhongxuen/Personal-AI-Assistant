@@ -58,3 +58,12 @@ class ToolRegistry:
     def aliases_for(self, name: str) -> list[str]:
         """All aliases registered for a canonical tool name (used by CommandRouter)."""
         return [alias for alias, canonical in self._aliases.items() if canonical == name]
+
+    def all_triggers(self) -> list[str]:
+        """Every canonical tool name plus every registered alias.
+
+        Used by CommandRouter for verb/phrase-prefix matching -- it needs the full set
+        of strings that could legally lead a message (e.g. "open", "remind me to"),
+        not just one tool's aliases at a time.
+        """
+        return [*self._tools.keys(), *self._aliases.keys()]

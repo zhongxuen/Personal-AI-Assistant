@@ -4,3 +4,6 @@ pydantic==2.10.4
 pydantic-settings==2.7.1
 sqlalchemy==2.0.36
 python-dotenv==1.0.1
+psutil==6.1.1
+dateparser==1.4.2
+APScheduler==3.11.3
