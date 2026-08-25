@@ -60,6 +60,8 @@ class Task(Base):
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    category: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    priority: Mapped[str] = mapped_column(String(20), nullable=False, default="medium")
     due_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()

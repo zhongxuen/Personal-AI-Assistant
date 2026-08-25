@@ -1,15 +1,19 @@
 """
-Command router tests (§2, §11).
+Command router tests (§2, §11, extended file 04 prompt 1).
 
 Registers a few fake tools (no real system side effects) and asserts that:
   - exact-name/alias matches resolve deterministically
   - "<verb> <remainder>" phrasings ("open vscode", "launch vscode", "start
     vscode") all resolve to the same tool + params
   - an unrelated phrase falls through to NEEDS_LLM
+  - the "remind me to X [time phrase]" alias splits the trailing/embedded date phrase
+    out of the title via `split_title_and_due` instead of file 03's naive
+    whole-remainder-as-title capture
 """
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 
 from app.core.command_router import NEEDS_LLM, CommandRouter, RouteResult
@@ -111,3 +115,40 @@ def test_empty_message_returns_needs_llm():
 
     assert router.route("") is NEEDS_LLM
     assert router.route("   ") is NEEDS_LLM
+
+
+# --- "remind me to X [time phrase]" -> create_task special-case -----------------------
+
+
+def _create_task_registry() -> ToolRegistry:
+    registry = ToolRegistry()
+    create_task = FakeTool(
+        name="create_task",
+        parameters={
+            "type": "object",
+            "properties": {"title": {"type": "string"}, "due": {"type": "string"}},
+            "required": ["title"],
+        },
+    )
+    registry.register(create_task, aliases=["remind me to"])
+    return registry
+
+
+def test_remind_me_to_splits_trailing_time_phrase_into_due_param():
+    router = CommandRouter(_create_task_registry())
+
+    result = router.route("remind me to submit my assignment tomorrow at 8pm")
+
+    assert result.tool_name == "create_task"
+    assert result.params["title"] == "submit my assignment"
+    # Just needs to be a real, parseable ISO datetime -- exact value depends on "now".
+    assert datetime.fromisoformat(result.params["due"]).hour == 20
+
+
+def test_remind_me_to_without_time_phrase_has_no_due_param():
+    router = CommandRouter(_create_task_registry())
+
+    result = router.route("remind me to buy milk")
+
+    assert result.tool_name == "create_task"
+    assert result.params == {"title": "buy milk"}
