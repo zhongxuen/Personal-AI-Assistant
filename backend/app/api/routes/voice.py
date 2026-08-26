@@ -35,7 +35,7 @@ from __future__ import annotations
 import base64
 import logging
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -45,6 +45,7 @@ from app.api.dependencies import (
     get_tool_registry,
     get_tts_provider,
 )
+from app.api.local_only import enforce_desktop_local_only
 from app.core.assistant import AssistantCore
 from app.database.database import get_db
 from app.llm.health import HealthManager
@@ -69,6 +70,7 @@ class VoiceMessageResponse(BaseModel):
 
 @router.post("/voice/message", response_model=VoiceMessageResponse)
 def post_voice_message(
+    http_request: Request,
     audio: UploadFile | None = File(None),
     text: str | None = Form(None),
     dry_run: bool = Form(False),
@@ -83,6 +85,11 @@ def post_voice_message(
     stt: SpeechToTextProvider = Depends(get_stt_provider),
     tts: TextToSpeechProvider = Depends(get_tts_provider),
 ) -> VoiceMessageResponse:
+    # This route only ever builds platform="desktop" requests (via DesktopAdapter
+    # below), so the local-only boundary (§23, app.api.local_only) applies
+    # unconditionally here, checked up front before any STT work is done.
+    enforce_desktop_local_only(http_request, "desktop")
+
     if audio is None and text is None:
         raise HTTPException(status_code=400, detail="Provide either 'audio' or 'text'.")
     if audio is not None and text is not None:

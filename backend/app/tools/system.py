@@ -1,9 +1,14 @@
 """
-System info tools (§37 Phase 2 / file 03).
+System info tools (§37 Phase 2 / file 03; extended file 11 prompt 1).
 
 `get_time` and `get_system_info` are the two simplest possible `Tool` implementations --
 no params, no side effects beyond reading the local clock / OS state -- used to prove the
 zero-LLM CommandRouter -> ToolExecutor -> Tool.handler path end to end (§9, §41 Rule 4).
+
+`list_processes`/`get_process_info` (file 11, Desktop Agent Expansion, §23) are read-only
+`psutil` process inspection -- SAFE like the two above, since listing/inspecting processes
+by itself changes nothing on the machine (unlike `close_application`'s CONFIRM-gated
+`terminate()`).
 """
 
 from __future__ import annotations
@@ -82,5 +87,121 @@ class GetSystemInfoTool:
         return ToolResult(success=True, data={"message": message, **info})
 
 
+class ListProcessesTool:
+    """Lists running processes (pid/name/status/memory), optionally filtered by name."""
+
+    name = "list_processes"
+    description = "List running processes, optionally filtered by a name substring."
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "name_filter": {
+                "type": "string",
+                "description": "Optional case-insensitive substring to filter process names by.",
+            }
+        },
+        "required": [],
+    }
+    permission = PermissionLevel.SAFE
+    platforms = ["desktop"]
+    requires_confirmation = False
+
+    def handler(self, name_filter: str | None = None, **kwargs: Any) -> ToolResult:
+        filter_lower = name_filter.strip().lower() if name_filter else None
+        processes: list[dict[str, Any]] = []
+        for proc in psutil.process_iter(["pid", "name", "status", "memory_percent"]):
+            try:
+                info = proc.info
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            proc_name = info.get("name") or ""
+            if filter_lower and filter_lower not in proc_name.lower():
+                continue
+            processes.append(
+                {
+                    "pid": info.get("pid"),
+                    "name": proc_name,
+                    "status": info.get("status"),
+                    "memory_percent": round(info.get("memory_percent") or 0.0, 2),
+                }
+            )
+        processes.sort(key=lambda p: p["name"].lower())
+
+        message = f"{len(processes)} process(es)"
+        if name_filter:
+            message += f" matching '{name_filter}'"
+        message += "."
+        return ToolResult(success=True, data={"message": message, "processes": processes})
+
+
+class GetProcessInfoTool:
+    """Reports detailed info for a single process, looked up by pid or by name."""
+
+    name = "get_process_info"
+    description = "Get detailed info (status, CPU, memory, start time) for a running process by pid or name."
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "pid": {"type": "integer", "description": "Process id to look up."},
+            "name": {
+                "type": "string",
+                "description": "Process name to look up (first case-insensitive match) if pid isn't given.",
+            },
+        },
+        "required": [],
+    }
+    permission = PermissionLevel.SAFE
+    platforms = ["desktop"]
+    requires_confirmation = False
+
+    def handler(self, pid: int | None = None, name: str | None = None, **kwargs: Any) -> ToolResult:
+        if pid is None and not name:
+            return ToolResult(success=False, error="Provide a 'pid' or a 'name' to look up.")
+
+        proc: psutil.Process | None = None
+        if pid is not None:
+            try:
+                proc = psutil.Process(pid)
+            except psutil.NoSuchProcess:
+                return ToolResult(success=False, error=f"No process found with pid {pid}.")
+        else:
+            name_lower = name.strip().lower()  # type: ignore[union-attr]
+            for candidate in psutil.process_iter(["pid", "name"]):
+                try:
+                    if (candidate.info.get("name") or "").lower() == name_lower:
+                        proc = candidate
+                        break
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            if proc is None:
+                return ToolResult(success=False, error=f"No running process found named '{name}'.")
+
+        try:
+            with proc.oneshot():
+                try:
+                    exe = proc.exe()
+                except (psutil.AccessDenied, psutil.NoSuchProcess):
+                    exe = None
+                info = {
+                    "pid": proc.pid,
+                    "name": proc.name(),
+                    "status": proc.status(),
+                    "cpu_percent": proc.cpu_percent(interval=0.1),
+                    "memory_percent": round(proc.memory_percent(), 2),
+                    "create_time": datetime.fromtimestamp(proc.create_time()).isoformat(),
+                    "exe": exe,
+                }
+        except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+            return ToolResult(success=False, error=f"Failed to read process info: {exc}")
+
+        message = (
+            f"{info['name']} (pid {info['pid']}): {info['status']}, "
+            f"CPU {info['cpu_percent']}%, memory {info['memory_percent']}%."
+        )
+        return ToolResult(success=True, data={"message": message, **info})
+
+
 get_time_tool = GetTimeTool()
 get_system_info_tool = GetSystemInfoTool()
+list_processes_tool = ListProcessesTool()
+get_process_info_tool = GetProcessInfoTool()

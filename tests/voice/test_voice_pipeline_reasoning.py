@@ -32,6 +32,7 @@ from app.api.dependencies import (
     get_tool_registry,
     get_tts_provider,
 )
+from app.api.local_only import LOCAL_CLIENT_HOSTS
 from app.database.database import get_db
 from app.llm.ai_router import AIRouter
 from app.llm.base import LLMResult
@@ -103,13 +104,20 @@ def registry() -> ToolRegistry:
 
 
 @pytest.fixture()
-def client(test_db, registry, mocked_ai_router_route):
+def client(test_db, registry, mocked_ai_router_route, monkeypatch):
     def override_get_db():
         db = test_db()
         try:
             yield db
         finally:
             db.close()
+
+    # POST /api/voice/message always runs as platform="desktop" (app.api.local_only,
+    # file 11 prompt 3), and Starlette's TestClient reports a fixed synthetic client
+    # host ("testclient") that isn't real loopback -- trust it here so these tests
+    # keep exercising the voice pipeline itself, not the local-only boundary (that
+    # boundary has its own coverage in tests/api/test_desktop_local_only.py).
+    monkeypatch.setattr("app.api.local_only.LOCAL_CLIENT_HOSTS", LOCAL_CLIENT_HOSTS | {"testclient"})
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_tool_registry] = lambda: registry

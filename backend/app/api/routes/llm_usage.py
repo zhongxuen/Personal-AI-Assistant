@@ -19,6 +19,10 @@ reported together for the frontend's status panel:
 Read-only: this route cannot reset a provider's health or change its budget --
 `HealthManager.reset()` and quota config stay code-level operator actions, not
 exposed over HTTP.
+
+Requires a valid bearer token (§34, file 12 prompt 1, router-level `get_current_user`
+dependency) -- this status panel is reachable over the web, not gated by
+`app.api.local_only`'s loopback check.
 """
 
 from __future__ import annotations
@@ -30,14 +34,14 @@ from pydantic import BaseModel
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_health_manager
+from app.api.dependencies import get_current_user, get_health_manager
 from app.database.database import get_db
 from app.database.models import LLMUsage
 from app.llm.health import HealthManager
 from app.llm.provider_manager import ProviderManager
 from app.llm.quota_manager import QuotaManager, start_of_today_utc
 
-router = APIRouter(tags=["llm"])
+router = APIRouter(tags=["llm"], dependencies=[Depends(get_current_user)])
 
 
 class ProviderHealthOut(BaseModel):

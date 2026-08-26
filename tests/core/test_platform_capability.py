@@ -1,10 +1,18 @@
 """
-Platform capability tests (§22).
+Platform capability tests (§22, extended file 11 prompt 3).
 
 Registers a desktop-only tool and a tool available on desktop/web/discord,
 and asserts ToolExecutor rejects the desktop-only tool for an unsupported
 platform (with a clear explanatory error) while accepting it for a
 supported one.
+
+`test_real_desktop_tool_rejected_on_unsupported_platform` extends this with one of
+file 11's actual desktop-agent tools (`clipboard_read`, platforms=["desktop"]) rather
+than only `FakeTool`, so this doesn't just prove the executor's platform-check logic in
+the abstract -- it proves a genuine desktop-only tool from the Desktop Agent Expansion
+is unreachable from a non-desktop platform, with the same explanatory message pattern
+(§22: "I can ... but this Discord instance cannot control your PC" -- i.e. the error
+names the rejected platform, not a generic "forbidden").
 """
 
 from __future__ import annotations
@@ -14,6 +22,7 @@ from typing import Any
 from app.core.permissions import PermissionLevel, RequesterContext
 from app.core.tool_executor import ToolExecutor
 from app.tools.base import ToolResult
+from app.tools.clipboard import clipboard_read_tool
 from app.tools.registry import ToolRegistry
 
 
@@ -78,3 +87,20 @@ def test_cross_platform_tool_accepted_on_every_declared_platform():
         assert result.success is True
 
     assert all_platforms.calls == 3
+
+
+def test_real_desktop_tool_rejected_on_unsupported_platform():
+    """`clipboard_read` (file 11, app/tools/clipboard.py) declares platforms=
+    ["desktop"] like every other Desktop Agent Expansion tool -- registering the real
+    tool (not FakeTool) proves ToolExecutor's platform gate actually covers it, with
+    the same explanatory-message pattern as the FakeTool tests above.
+    """
+    registry = ToolRegistry()
+    registry.register(clipboard_read_tool)
+    executor = ToolExecutor(registry)
+
+    result = executor.execute(clipboard_read_tool.name, {}, _context("discord"))
+
+    assert result.success is False
+    assert result.error is not None
+    assert "discord" in result.error.lower()

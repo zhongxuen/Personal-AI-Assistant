@@ -15,19 +15,26 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.dependencies import get_tool_registry
 from app.api.routes.assistant import router as assistant_router
+from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
 from app.api.routes.llm_usage import router as llm_usage_router
 from app.api.routes.memory import router as memory_router
 from app.api.routes.routines import router as routines_router
 from app.api.routes.tasks import router as tasks_router
 from app.api.routes.voice import router as voice_router
+from app.auth.service import AuthService
 from app.config.logging import configure_logging
 from app.config.settings import get_settings
 from app.database import models  # noqa: F401  (import registers models on Base.metadata)
-from app.database.database import Base, engine
+from app.database.database import Base, SessionLocal, engine
 from app.routines.scheduler import RoutineScheduler
 from app.tasks.scheduler import ReminderScheduler
 from app.tools import register_default_tools
+
+# The one hardcoded literal this insecure-default check compares against -- kept as a
+# module constant (not re-read from Settings' field default) so the comparison stays
+# correct even if pydantic-settings' default-introspection API ever changes.
+_INSECURE_DEFAULT_AUTH_SECRET_KEY = "dev-only-insecure-secret-change-me"
 
 settings = get_settings()
 configure_logging(settings.log_level)
@@ -60,6 +67,25 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # seeds the "coding" routine as a persisted row the first time this runs (file 04
     # prompt 2) -- see register_default_tools' docstring.
     register_default_tools(get_tool_registry())
+    # §34, file 12 prompt 1: create the one bootstrap personal user if
+    # AUTH_SEED_USERNAME/AUTH_SEED_PASSWORD are configured and it doesn't already
+    # exist -- see AuthService.seed_default_user's docstring. Its own short-lived
+    # session, same convention as every other module here that isn't handed the
+    # request's own `db` (RoutineEngine.run, the tools/* handlers).
+    with SessionLocal() as db:
+        AuthService(db).seed_default_user(settings.auth_seed_username, settings.auth_seed_password)
+    # A default signing secret is fine for local development (nothing it protects is
+    # reachable from outside this machine yet), but must never be what a real
+    # deployment issues tokens with -- warn loudly rather than fail startup, since
+    # failing startup would also break every existing local-dev workflow that hasn't
+    # set AUTH_SECRET_KEY.
+    if settings.auth_secret_key == _INSECURE_DEFAULT_AUTH_SECRET_KEY and settings.app_env != "development":
+        logger.warning(
+            "AUTH_SECRET_KEY is still the insecure development default while "
+            "app_env=%r. Set AUTH_SECRET_KEY via environment variable before this "
+            "backend is reachable from anywhere but localhost.",
+            settings.app_env,
+        )
     # Phase 3 (file 04): start polling task_reminders for due reminders.
     reminder_scheduler.start()
     yield
@@ -77,6 +103,7 @@ app.add_middleware(
 )
 
 app.include_router(health_router, prefix="/api")
+app.include_router(auth_router, prefix="/api")
 app.include_router(assistant_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
 app.include_router(routines_router, prefix="/api")

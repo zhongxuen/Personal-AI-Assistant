@@ -7,7 +7,9 @@ fixture wires into `RoutineEngine` (tests/conftest.py), so `POST /routines/{name
 -- which runs through `RoutineEngine`'s own session, not the request's -- sees the same
 routines these tests create via the CRUD routes. `get_tool_registry` is overridden to a
 registry of stub tools (same pattern as tests/routines/test_engine.py) so tests don't
-depend on any real tool's side effects.
+depend on any real tool's side effects. `get_current_user` is overridden to a fixed
+stub user (§34, file 12 prompt 1) -- these routes now require authentication, covered
+separately by tests/api/test_auth.py.
 """
 
 from __future__ import annotations
@@ -17,7 +19,7 @@ from unittest.mock import Mock
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_tool_registry
+from app.api.dependencies import get_current_user, get_tool_registry
 from app.core.permissions import PermissionLevel
 from app.database.database import get_db
 from app.tools.base import ToolResult
@@ -57,6 +59,10 @@ def client(test_db):
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_tool_registry] = lambda: registry
+    # §34, file 12 prompt 1: this router now requires authentication -- stub it out
+    # here since these tests exercise the routine CRUD/run contract, not auth itself
+    # (tests/api/test_auth.py covers that).
+    app.dependency_overrides[get_current_user] = lambda: object()
     yield TestClient(app)
     app.dependency_overrides.clear()
 

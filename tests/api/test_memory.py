@@ -3,6 +3,8 @@ Memory settings route tests (§37 Phase 8 / file 09 prompt 3).
 
 Exercises `/api/memory/applications` and `/api/memory/default-project` through
 FastAPI's `TestClient`, same `get_db` override pattern as tests/api/test_routines.py.
+`get_current_user` is overridden to a fixed stub user (§34, file 12 prompt 1) -- these
+routes now require authentication, covered separately by tests/api/test_auth.py.
 """
 
 from __future__ import annotations
@@ -10,6 +12,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.dependencies import get_current_user
 from app.database.database import get_db
 from app.memory.service import DEFAULT_CODING_CATEGORY, DEFAULT_CODING_KEY, MemoryService
 from main import app
@@ -25,6 +28,7 @@ def client(test_db):
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = lambda: object()
     yield TestClient(app)
     app.dependency_overrides.clear()
 

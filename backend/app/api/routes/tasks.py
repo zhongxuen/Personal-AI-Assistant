@@ -11,6 +11,11 @@ Distinct from `app/tools/tasks.py` (the LLM/CommandRouter-facing `Tool` wrappers
 the same service) -- these routes exist for the Task Dashboard frontend to hit directly
 over plain REST, without going through `ToolExecutor`/`PermissionChecker`. Both layers
 are thin shells around `TaskService`; neither duplicates its logic.
+
+This is a "non-desktop-local" route in §34's sense -- the Task Dashboard is reachable
+over the web (file 12), not gated by `app.api.local_only`'s loopback check -- so every
+route here requires a valid bearer token via the router-level `get_current_user`
+dependency. See docs/security.md.
 """
 
 from __future__ import annotations
@@ -21,11 +26,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import get_current_user
 from app.database.database import get_db
 from app.database.models import Task
 from app.tasks.service import TaskService
 
-router = APIRouter(tags=["tasks"])
+router = APIRouter(tags=["tasks"], dependencies=[Depends(get_current_user)])
 
 
 class TaskOut(BaseModel):

@@ -31,6 +31,7 @@ from app.api.dependencies import (
     get_tool_registry,
     get_tts_provider,
 )
+from app.api.local_only import LOCAL_CLIENT_HOSTS
 from app.database.database import get_db
 from app.llm.health import HealthManager
 from app.tools import applications as applications_module
@@ -132,7 +133,7 @@ def stt(monkeypatch):
 
 
 @pytest.fixture()
-def client(test_db, stt):
+def client(test_db, stt, monkeypatch):
     from fastapi.testclient import TestClient
 
     def override_get_db():
@@ -141,6 +142,13 @@ def client(test_db, stt):
             yield db
         finally:
             db.close()
+
+    # POST /api/voice/message always runs as platform="desktop" (app.api.local_only,
+    # file 11 prompt 3), and Starlette's TestClient reports a fixed synthetic client
+    # host ("testclient") that isn't real loopback -- trust it here so these tests
+    # keep exercising the voice pipeline itself, not the local-only boundary (that
+    # boundary has its own coverage in tests/api/test_desktop_local_only.py).
+    monkeypatch.setattr("app.api.local_only.LOCAL_CLIENT_HOSTS", LOCAL_CLIENT_HOSTS | {"testclient"})
 
     app.dependency_overrides[get_db] = override_get_db
     yield TestClient(app)

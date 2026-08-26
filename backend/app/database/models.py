@@ -37,6 +37,13 @@ class User(Base):
 
     id: Mapped[int] = _pk()
     username: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
+    # PBKDF2-HMAC-SHA256 hash, `app/auth/security.py`'s self-describing
+    # "pbkdf2_sha256$<iterations>$<salt-b64>$<hash-b64>" format (§34, file 12 prompt
+    # 1) -- never a plaintext password, and never compared with anything but
+    # `verify_password()`'s constant-time check. Nullable only so this column can be
+    # added without breaking any pre-existing row; every user created through
+    # `AuthService` always sets it.
+    password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
 

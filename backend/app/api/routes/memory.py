@@ -14,6 +14,10 @@ resolves `open_application`/`close_application` against) and the "coding" routin
 `app/tools/routines.py`). Not a general key/value editor over every memory category --
 if a future settings surface needs more, it can add routes here without touching this
 module's existing ones.
+
+Every route here requires a valid bearer token (§34, file 12 prompt 1, router-level
+`get_current_user` dependency) -- this settings surface is reachable over the web, not
+gated by `app.api.local_only`'s loopback check.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.api.dependencies import get_current_user
 from app.database.database import get_db
 from app.memory.service import (
     APPLICATIONS,
@@ -33,7 +38,7 @@ from app.memory.service import (
     MemoryService,
 )
 
-router = APIRouter(prefix="/memory", tags=["memory"])
+router = APIRouter(prefix="/memory", tags=["memory"], dependencies=[Depends(get_current_user)])
 
 
 class ApplicationMappingOut(BaseModel):

@@ -111,9 +111,44 @@ class Settings(BaseSettings):
     tts_volume: float = 1.0
     tts_voice_id: str | None = None
 
+    # File-tool sandbox (§33, file 11). Comma-separated allow-list of base directories
+    # `app/tools/files.py` (via `app/tools/path_safety.py`) may touch -- same
+    # string-plus-derived-list convention as `cors_origins` above, so it's configurable
+    # via env/.env without a code change (§30). Left empty by default;
+    # `allowed_file_directories_list` falls back to the user's home Desktop/Documents
+    # folders so the file tools are useful out of the box without granting free rein
+    # over the whole disk -- tighten or widen via env as needed.
+    allowed_file_directories: str = ""
+
+    # Authentication (§34, file 12 prompt 1). HS256 JWT issued by POST /api/auth/login
+    # and required by `app.api.dependencies.get_current_user` on every non-desktop-local
+    # route -- see docs/security.md. `auth_secret_key`'s default is intentionally
+    # obviously-insecure so it's never mistaken for a real secret; it MUST be
+    # overridden via env for any deployment reachable from outside this machine (file
+    # 12's Vercel/web deployment) -- `main.py`'s startup logs a warning if it's still
+    # the default outside `app_env == "development"`.
+    auth_secret_key: str = "dev-only-insecure-secret-change-me"
+    auth_algorithm: str = "HS256"
+    auth_token_expire_minutes: int = 60 * 24  # 24h -- personal single-user session, not a short-lived web SSO token
+
+    # Optional bootstrap user (§34): if both are set and no user with this username
+    # exists yet, `main.py`'s startup creates it via `AuthService.seed_default_user`.
+    # Deliberately env-configured rather than a public /api/auth/register endpoint --
+    # this app has exactly one personal user today and open self-registration isn't
+    # appropriate for it (see app/auth/service.py's docstring).
+    auth_seed_username: str | None = None
+    auth_seed_password: str | None = None
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def allowed_file_directories_list(self) -> list[str]:
+        configured = [d.strip() for d in self.allowed_file_directories.split(",") if d.strip()]
+        if configured:
+            return configured
+        return [str(Path.home() / "Desktop"), str(Path.home() / "Documents")]
 
 
 @lru_cache

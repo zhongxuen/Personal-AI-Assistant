@@ -18,7 +18,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
-from app.api.dependencies import get_health_manager
+from app.api.dependencies import get_current_user, get_health_manager
 from app.config.settings import Settings
 from app.database.database import get_db
 from app.database.models import LLMUsage
@@ -114,6 +114,10 @@ def client(test_db, monkeypatch, health_manager):
 
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_health_manager] = lambda: health_manager
+    # §34, file 12 prompt 1: this router now requires authentication -- stub it out
+    # here since these tests exercise the usage/status contract, not auth itself
+    # (tests/api/test_auth.py covers that).
+    app.dependency_overrides[get_current_user] = lambda: object()
     yield TestClient(app)
     app.dependency_overrides.clear()
 

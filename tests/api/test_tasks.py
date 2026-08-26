@@ -7,6 +7,11 @@ into the tool layer (tests/conftest.py). Verifies the HTTP contract -- status co
 JSON shape, filtering, partial-update semantics -- sits correctly on top of
 `TaskService` without re-testing `TaskService` itself (already covered by
 tests/tasks/test_task_service.py).
+
+`get_current_user` is overridden to a fixed stub user (§34, file 12 prompt 1) -- these
+routes now require authentication (tests/api/test_auth.py covers that requirement
+itself), and re-authenticating in every test here would just be noise unrelated to
+what this file actually exercises.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
+from app.api.dependencies import get_current_user
 from app.database.database import get_db
 from main import app
 
@@ -28,6 +34,7 @@ def client(test_db):
             db.close()
 
     app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_current_user] = lambda: object()
     yield TestClient(app)
     app.dependency_overrides.clear()
 

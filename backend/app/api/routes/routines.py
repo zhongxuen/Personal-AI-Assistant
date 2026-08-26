@@ -12,6 +12,16 @@ nothing here re-implements them.
 `GET /tools` is included here (not its own route module) because its only consumer is
 the Routine Dashboard's step editor, which needs to know what tools exist to build a
 step against -- it's a read-only projection of `ToolRegistry.list()`, not a new concept.
+
+Every route here requires a valid bearer token (§34, file 12 prompt 1, router-level
+`get_current_user` dependency) -- the Routine Dashboard is reachable over the web, not
+gated by `app.api.local_only`'s loopback check. This also closes the gap
+docs/security.md flagged in file 11: `POST /routines/{name}/run` previously had no
+boundary at all (`RoutineEngine.run()` defaults to `platform="desktop"` when the route
+supplies none), so an unauthenticated remote caller could run a routine's full desktop
+tool chain. It's authenticated now like every other route in this file -- a real
+per-request `RequesterContext` derived from the platform is still file 12's/a later
+file's job, tracked separately, but "no auth at all" is closed here.
 """
 
 from __future__ import annotations
@@ -22,13 +32,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_tool_registry
+from app.api.dependencies import get_current_user, get_tool_registry
 from app.database.database import get_db
 from app.routines.engine import RoutineEngine
 from app.routines.registry import RoutineData, RoutineRegistry
 from app.tools.registry import ToolRegistry
 
-router = APIRouter(tags=["routines"])
+router = APIRouter(tags=["routines"], dependencies=[Depends(get_current_user)])
 
 
 class RoutineStepIn(BaseModel):
