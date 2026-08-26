@@ -1,0 +1,55 @@
+# Render Blueprint for the JARVIS backend/API (file 12 prompt 3, docs/deployment.md).
+#
+# Deploys `backend/` as a single free-tier Python web service. Non-secret config is
+# set here as code; anything secret (`sync: false`) is intentionally left for you to
+# type into the Render dashboard once, the same "env vars on the host, never in the
+# repo" rule main.py/settings.py already follow locally via .env (see .env.example).
+#
+# Import this file at https://dashboard.render.com/blueprints ("New Blueprint
+# Instance", pick this repo) rather than clicking through a manual "New Web Service"
+# form -- see docs/deployment.md for the full walkthrough.
+services:
+  - type: web
+    name: jarvis-api
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    # Render injects $PORT itself; main.py's own API_PORT/API_HOST settings only apply
+    # when main.py is run directly (`python main.py`), not here -- uvicorn is invoked
+    # against main:app directly, same as `frontend`'s dev server hits it locally.
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: APP_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      # SQLite on the free plan's ephemeral disk -- resets on every deploy/restart.
+      # Fine for a personal demo; see docs/deployment.md's persistence note before
+      # relying on it for anything you can't afford to lose.
+      - key: DATABASE_URL
+        value: sqlite:///./jarvis.db
+      # The deployed frontend's exact origin (e.g. https://jarvis-xyz.vercel.app) --
+      # set once the Vercel deploy's URL is known; see docs/deployment.md step order.
+      - key: CORS_ORIGINS
+        sync: false
+      # MUST be a long random value, different from the insecure dev default -- see
+      # docs/security.md. `python -c "import secrets; print(secrets.token_urlsafe(48))"`
+      - key: AUTH_SECRET_KEY
+        sync: false
+      # One-time bootstrap login for the deployed instance -- leave both unset to skip
+      # seeding (you'd then have no way to log in at all, so set these).
+      - key: AUTH_SEED_USERNAME
+        sync: false
+      - key: AUTH_SEED_PASSWORD
+        sync: false
+      # Required for any Gemini call to succeed; GeminiProvider.is_available() is
+      # False (not an error) when unset. Never set VITE_-prefixed or otherwise ship
+      # this to the frontend -- see docs/deployment.md's secrets-boundary section.
+      - key: GEMINI_API_KEY
+        sync: false
+      # No Ollama server is reachable from Render -- disable the probe outright
+      # instead of letting every request pay OLLAMA_AVAILABILITY_TIMEOUT_SECONDS.
+      - key: OLLAMA_ENABLED
+        value: "false"
