@@ -19,6 +19,9 @@ export interface ProviderUsage {
   response_tokens: number
   failures: number
   fallback_count: number
+  /** Today's internal request budget, or null when this provider is unmetered
+   * (e.g. Ollama -- local/free, no cloud quota to bar-chart). */
+  budget: number | null
   quota_status: string
   status: ProviderStatusBadge
   health: ProviderHealth

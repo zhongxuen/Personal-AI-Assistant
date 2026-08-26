@@ -58,6 +58,11 @@ class ProviderUsageOut(BaseModel):
     response_tokens: int
     failures: int
     fallback_count: int
+    # Today's internal request budget (`QuotaManager.budget_for`), or None when this
+    # provider is unmetered (e.g. Ollama -- local/free, no cloud quota to bar-chart).
+    # Powers the frontend's used/limit bar; `quota_status`/`status` alone can't since
+    # they only ever say NORMAL/WARNING/CRITICAL/FAILOVER, not the underlying numbers.
+    budget: int | None
     quota_status: str
     # The single badge value the frontend renders (NORMAL/WARNING/CRITICAL/FAILOVER,
     # §8/§39) -- `quota_status` downgraded to FAILOVER whenever HealthManager also
@@ -132,6 +137,7 @@ def get_llm_usage(
             ProviderUsageOut(
                 provider=name,
                 enabled=name in enabled_names,
+                budget=quota_manager.budget_for(name),
                 quota_status=quota_status,
                 status=_status_badge(quota_status, health_status.healthy),
                 health=ProviderHealthOut(

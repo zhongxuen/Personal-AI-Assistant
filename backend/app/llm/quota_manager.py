@@ -70,6 +70,16 @@ class QuotaManager:
             return self._settings.gemini_daily_request_budget
         return None
 
+    def budget_for(self, provider: str) -> int | None:
+        """Public wrapper around `_budget_for` -- lets callers outside this module
+        (e.g. `app.api.routes.llm_usage`'s usage panel) report the raw budget number
+        alongside `status()`, so the frontend can render an actual used/limit bar
+        instead of just a NORMAL/WARNING/CRITICAL/FAILOVER badge. None means
+        unmetered (e.g. Ollama, which is local/free per the development plan), not
+        "zero budget".
+        """
+        return self._budget_for(provider)
+
     def current_usage(self, provider: str) -> int:
         """Count of `provider`'s `llm_usage` rows since midnight UTC today -- every
         `generate()` call logs a row regardless of outcome (§5), so this counts

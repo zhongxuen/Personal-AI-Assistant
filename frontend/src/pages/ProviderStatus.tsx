@@ -1,4 +1,5 @@
-import { useLlmUsage } from '../hooks/useLlmUsage'
+import type { useLlmUsage } from '../hooks/useLlmUsage'
+import { LimitBar } from '../components/LimitBar'
 import type { ProviderStatusBadge, ProviderUsage } from '../types/llmUsage'
 
 // §39 MVP UI requirement: one badge per provider, NORMAL/WARNING/CRITICAL/FAILOVER.
@@ -42,8 +43,16 @@ function ProviderCard({ provider }: { provider: ProviderUsage }) {
         <StatusBadge status={provider.status} />
       </div>
 
-      <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-4">
-        <Stat label="Requests today" value={provider.requests} />
+      <div className="mt-4">
+        <LimitBar
+          label="Daily request budget"
+          used={provider.requests}
+          limit={provider.budget}
+          status={provider.status}
+        />
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3">
         <Stat label="Tokens (req/res)" value={`${provider.request_tokens} / ${provider.response_tokens}`} />
         <Stat label="Failures" value={provider.failures} />
         <Stat label="Fallbacks" value={provider.fallback_count} />
@@ -62,8 +71,14 @@ function ProviderCard({ provider }: { provider: ProviderUsage }) {
   )
 }
 
-export function ProviderStatusPage() {
-  const { data, loading, error, refresh } = useLlmUsage()
+interface ProviderStatusPageProps {
+  // Hoisted to App.tsx so its 15s poll is shared with the nav strip's compact bars
+  // instead of each opening its own independent `/api/llm/usage` interval.
+  llmUsage: ReturnType<typeof useLlmUsage>
+}
+
+export function ProviderStatusPage({ llmUsage }: ProviderStatusPageProps) {
+  const { data, loading, error, refresh } = llmUsage
 
   return (
     <main className="min-h-screen bg-slate-950 px-6 py-10 text-slate-100">

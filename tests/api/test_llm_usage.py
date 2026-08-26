@@ -196,6 +196,21 @@ def test_status_badge_reports_failover_when_unhealthy_even_with_quota_headroom(
     assert gemini["status"] == "FAILOVER"
 
 
+def test_budget_reported_for_metered_provider_and_null_for_unmetered(client):
+    # "gemini" is metered by the stubbed settings (budget=10); "disabled_provider"
+    # isn't recognized by `QuotaManager._budget_for` at all, same as Ollama in
+    # production -- both should report budget=None rather than 0, since None means
+    # "unmetered" and 0 would mean "no requests allowed today".
+    response = client.get("/api/llm/usage")
+    body = response.json()
+
+    gemini = next(p for p in body["providers"] if p["provider"] == "gemini")
+    other = next(p for p in body["providers"] if p["provider"] == "disabled_provider")
+
+    assert gemini["budget"] == 10
+    assert other["budget"] is None
+
+
 def test_includes_providers_with_historical_rows_no_longer_configured(client, test_db):
     session = test_db()
     _add_usage_rows(session, provider="retired_provider", count=2)

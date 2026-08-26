@@ -95,6 +95,13 @@ def test_zero_budget_fails_over_immediately_with_no_usage(test_db):
     assert manager.within_budget("gemini") is False
 
 
+def test_budget_for_reports_configured_budget_and_none_when_unmetered(test_db):
+    manager = QuotaManager(settings=_settings(), db=test_db())
+
+    assert manager.budget_for("gemini") == 10
+    assert manager.budget_for("ollama") is None
+
+
 def test_unmetered_provider_is_always_normal_and_within_budget(test_db):
     session = test_db()
     _add_usage_rows(session, provider="ollama", count=1000)
