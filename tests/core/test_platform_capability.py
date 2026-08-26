@@ -13,6 +13,12 @@ the abstract -- it proves a genuine desktop-only tool from the Desktop Agent Exp
 is unreachable from a non-desktop platform, with the same explanatory message pattern
 (§22: "I can ... but this Discord instance cannot control your PC" -- i.e. the error
 names the rejected platform, not a generic "forbidden").
+
+`test_open_application_rejected_on_web_platform` (file 12 prompt 4) is the specific
+scenario development-plan.md §22's own example names -- a web-originated request for
+`open_application` -- run against the real tool, not `FakeTool`, and additionally
+proves the rejection isn't just *labeled* a failure but actually never attempts to
+launch anything (`os.startfile` is patched and asserted uncalled).
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ from typing import Any
 
 from app.core.permissions import PermissionLevel, RequesterContext
 from app.core.tool_executor import ToolExecutor
+from app.tools.applications import open_application_tool
 from app.tools.base import ToolResult
 from app.tools.clipboard import clipboard_read_tool
 from app.tools.registry import ToolRegistry
@@ -104,3 +111,25 @@ def test_real_desktop_tool_rejected_on_unsupported_platform():
     assert result.success is False
     assert result.error is not None
     assert "discord" in result.error.lower()
+
+
+def test_open_application_rejected_on_web_platform(monkeypatch):
+    """§22's own example (development-plan.md: "I can open applications when you are
+    connected to your desktop Jarvis agent...") run against the real `open_application`
+    tool with `platform="web"` -- the exact caller file 12's deployed dashboard is.
+    `os.startfile` is patched so a regression that skips the platform check and
+    actually tries to launch something is caught here, not just a success/failure flag.
+    """
+    launched: list[str] = []
+    monkeypatch.setattr("os.startfile", lambda path: launched.append(path), raising=False)
+
+    registry = ToolRegistry()
+    registry.register(open_application_tool)
+    executor = ToolExecutor(registry)
+
+    result = executor.execute(open_application_tool.name, {"app_name": "vscode"}, _context("web"))
+
+    assert result.success is False
+    assert result.error is not None
+    assert "web" in result.error.lower()
+    assert launched == []

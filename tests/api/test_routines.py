@@ -10,6 +10,16 @@ registry of stub tools (same pattern as tests/routines/test_engine.py) so tests 
 depend on any real tool's side effects. `get_current_user` is overridden to a fixed
 stub user (§34, file 12 prompt 1) -- these routes now require authentication, covered
 separately by tests/api/test_auth.py.
+
+`client` also monkeypatches `LOCAL_CLIENT_HOSTS` to accept the TestClient's synthetic
+"testclient" host (same trick tests/api/test_auth.py uses) so `run_routine`'s
+`is_local_client` check (file 12 prompt 2) treats these tests as a same-machine caller
+by default -- most of these tests are about routine CRUD/run mechanics, not platform
+capability, and the stub tools below declare `platforms=["desktop"]`, so without this
+every `POST /routines/{name}/run` call would now correctly, but irrelevantly to what
+these tests check, be rejected as a "remote" caller.
+`test_run_routine_desktop_only_step_rejected_for_non_local_caller` below is the one
+test that deliberately does *not* get that treatment, to prove the opposite case.
 """
 
 from __future__ import annotations
@@ -20,11 +30,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.api.dependencies import get_current_user, get_tool_registry
+from app.api.local_only import LOCAL_CLIENT_HOSTS
 from app.core.permissions import PermissionLevel
 from app.database.database import get_db
 from app.tools.base import ToolResult
 from app.tools.registry import ToolRegistry
 from main import app
+
+
+class _StubUser:
+    """Minimal stand-in for `app.database.models.User` -- `run_routine` (file 12
+    prompt 2) reads `.username` off whatever `get_current_user` resolves to, so the
+    override below needs at least that attribute, unlike the bare `object()` this
+    stubbed out before that route read anything off it.
+    """
+
+    username = "stub-user"
 
 
 class _StubTool:
@@ -41,7 +62,7 @@ class _StubTool:
 
 
 @pytest.fixture()
-def client(test_db):
+def client(test_db, monkeypatch):
     def override_get_db():
         db = test_db()
         try:
@@ -57,12 +78,17 @@ def client(test_db):
         _StubTool("stub_second", Mock(return_value=ToolResult(success=True, data={"step": "second"})))
     )
 
+    # See module docstring -- treats the TestClient as a same-machine caller so
+    # run_routine's inferred platform is "desktop" (matching the stub tools'
+    # platforms=["desktop"]) by default.
+    monkeypatch.setattr("app.api.local_only.LOCAL_CLIENT_HOSTS", LOCAL_CLIENT_HOSTS | {"testclient"})
+
     app.dependency_overrides[get_db] = override_get_db
     app.dependency_overrides[get_tool_registry] = lambda: registry
     # §34, file 12 prompt 1: this router now requires authentication -- stub it out
     # here since these tests exercise the routine CRUD/run contract, not auth itself
     # (tests/api/test_auth.py covers that).
-    app.dependency_overrides[get_current_user] = lambda: object()
+    app.dependency_overrides[get_current_user] = lambda: _StubUser()
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -158,3 +184,26 @@ def test_run_unknown_routine(client):
     body = response.json()
     assert body["success"] is False
     assert "nope" in body["error"]
+
+
+def test_run_routine_desktop_only_step_rejected_for_non_local_caller(client, monkeypatch):
+    """file 12 prompt 2: `run_routine` infers `platform="web"` for a caller that
+    doesn't look local, rather than `RoutineEngine.run()`'s old unconditional
+    `platform="desktop"` default -- undoes the `client` fixture's own
+    `LOCAL_CLIENT_HOSTS` patch so the TestClient's "testclient" host goes back to being
+    treated as non-local, then asserts the desktop-only stub step (`stub_first`,
+    `platforms=["desktop"]`) is rejected with the §22-style explanation instead of
+    running.
+    """
+    monkeypatch.setattr("app.api.local_only.LOCAL_CLIENT_HOSTS", LOCAL_CLIENT_HOSTS)
+
+    client.post(
+        "/api/routines",
+        json={"name": "demo", "steps": [{"tool_name": "stub_first", "params": {"a": 1}}]},
+    )
+
+    response = client.post("/api/routines/demo/run")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["success"] is False
+    assert "web" in body["error"].lower()

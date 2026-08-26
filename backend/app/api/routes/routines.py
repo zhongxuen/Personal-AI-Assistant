@@ -19,21 +19,28 @@ gated by `app.api.local_only`'s loopback check. This also closes the gap
 docs/security.md flagged in file 11: `POST /routines/{name}/run` previously had no
 boundary at all (`RoutineEngine.run()` defaults to `platform="desktop"` when the route
 supplies none), so an unauthenticated remote caller could run a routine's full desktop
-tool chain. It's authenticated now like every other route in this file -- a real
-per-request `RequesterContext` derived from the platform is still file 12's/a later
-file's job, tracked separately, but "no auth at all" is closed here.
+tool chain. It's authenticated now like every other route in this file, and (file 12
+prompt 2) `run_routine` no longer relies on that `platform="desktop"` default at all --
+it builds a real per-request `RequesterContext` whose `platform` is inferred from
+`app.api.local_only.is_local_client`, so a routine step that's desktop-only
+(`platforms=["desktop"]`) is actually rejected by `ToolExecutor` with the §22-style
+explanation when "Run now" is clicked from a non-local browser, instead of either
+silently failing or being attempted for real against this process's host.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user, get_tool_registry
+from app.api.local_only import is_local_client
+from app.core.permissions import RequesterContext
 from app.database.database import get_db
+from app.database.models import User
 from app.routines.engine import RoutineEngine
 from app.routines.registry import RoutineData, RoutineRegistry
 from app.tools.registry import ToolRegistry
@@ -169,11 +176,31 @@ def delete_routine(name: str, db: Session = Depends(get_db)) -> None:
 
 
 @router.post("/routines/{name}/run", response_model=RoutineRunResult)
-def run_routine(name: str, tool_registry: ToolRegistry = Depends(get_tool_registry)) -> dict[str, Any]:
+def run_routine(
+    name: str,
+    http_request: Request,
+    tool_registry: ToolRegistry = Depends(get_tool_registry),
+    current_user: User = Depends(get_current_user),
+) -> dict[str, Any]:
     # RoutineEngine.run() opens its own short-lived session internally (see its
     # docstring) rather than reusing the request's `db` -- same as every other caller
     # (RunRoutineTool, RoutineScheduler).
-    result = RoutineEngine(tool_registry).run(name)
+    #
+    # This route's request body carries no explicit `platform` the way
+    # /assistant/message's does, so the effective platform is inferred from where the
+    # request actually came from (§22/§23, file 12 prompt 2) rather than
+    # RoutineEngine.run()'s old unconditional `platform="desktop"` default -- a routine
+    # containing a desktop-only step (e.g. open_application) must actually be blocked
+    # by ToolExecutor's platform check when "Run now" is clicked from a *remote*
+    # browser, not silently attempted against whatever machine this backend happens to
+    # be running on. A same-machine (loopback) caller -- the Routine Dashboard running
+    # against a local desktop deployment -- keeps today's full desktop capability.
+    context = RequesterContext(
+        user_id=current_user.username,
+        platform="desktop" if is_local_client(http_request) else "web",
+        scope="routine",
+    )
+    result = RoutineEngine(tool_registry).run(name, context=context)
     data = result.data or {}
     return {
         "success": result.success,

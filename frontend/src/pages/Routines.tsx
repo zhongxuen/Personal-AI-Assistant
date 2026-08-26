@@ -35,6 +35,24 @@ function parseSteps(steps: EditableStep[]): { steps: RoutineStep[] } | { error: 
   return { steps: parsed }
 }
 
+/** Tool names in `routine` that don't declare `"web"` in their `platforms` (§22, file
+ * 12 prompt 2) -- e.g. `open_application`, `platforms=["desktop"]`. Purely advisory:
+ * `ToolExecutor` (via `run_routine`'s inferred `RequesterContext.platform`, see
+ * backend/app/api/routes/routines.py) is what actually enforces this, and correctly
+ * still allows these when "Run now" is clicked from a same-machine (desktop) caller --
+ * this just surfaces the same §22-style explanation *before* a remote/web caller
+ * clicks the button, instead of only after the run comes back rejected.
+ */
+function desktopOnlyStepNames(routine: Routine, tools: ToolInfo[]): string[] {
+  const platformsByTool = new Map(tools.map((tool) => [tool.name, tool.platforms]))
+  const names = new Set<string>()
+  for (const step of routine.steps) {
+    const platforms = platformsByTool.get(step.tool_name)
+    if (platforms && !platforms.includes('web')) names.add(step.tool_name)
+  }
+  return [...names]
+}
+
 function StepEditor({
   steps,
   tools,
@@ -231,6 +249,7 @@ export function RoutinesPage() {
 
           {routines.map((routine) => {
             const result = runResults[routine.name]
+            const desktopOnlySteps = desktopOnlyStepNames(routine, tools)
             return (
               <div key={routine.name} className="rounded-lg border border-slate-800 bg-slate-900 p-4">
                 <div className="flex flex-wrap items-center justify-between gap-3">
@@ -239,6 +258,13 @@ export function RoutinesPage() {
                     <span className="ml-2 text-xs text-slate-500">
                       {routine.steps.length} step{routine.steps.length === 1 ? '' : 's'} · {routine.trigger_type}
                     </span>
+                    {desktopOnlySteps.length > 0 && (
+                      <p className="mt-1 text-xs text-amber-400">
+                        Includes desktop-only step{desktopOnlySteps.length === 1 ? '' : 's'} (
+                        {desktopOnlySteps.join(', ')}) -- only runs when Jarvis is reached from your own
+                        desktop, not over the web.
+                      </p>
+                    )}
                   </div>
                   <div className="flex gap-2">
                     <button

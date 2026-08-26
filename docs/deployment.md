@@ -50,7 +50,7 @@ way. What was checked:
   that doesn't arrive from loopback gets a 403 before any tool runs. Deployed on Render, none of
   that code path executes; `/api/voice/message` in particular always 403s remotely by design
   (voice is desktop-local only for now — see that route's docstring).
-- **Tests** — `pytest` (331 tests) passes as of this deploy; run it again after any further
+- **Tests** — `pytest` (335 tests) passes as of this deploy; run it again after any further
   change before redeploying.
 
 ## Environment variables
@@ -73,6 +73,27 @@ Set on the **frontend host** (Vercel → project → Settings → Environment Va
 | Variable | Required | Notes |
 |---|---|---|
 | `VITE_API_BASE_URL` | yes | The deployed backend's base URL, e.g. `https://jarvis-api-hi10.onrender.com` (no trailing slash, no `/api` suffix — routes already include it). Left unset, the frontend calls relative `/api/...` paths, which only works behind Vite's dev proxy. |
+
+## Web client (file 12 prompt 2)
+
+`frontend/src/pages/Login.tsx` gates the whole app: `App.tsx` renders it until
+`services/auth.ts` has a token (from a successful `POST /api/auth/login`, or a previous
+session's token still in `localStorage`), then unlocks the Chat/Tasks/Routines/Provider
+Status/Settings tabs. Logging out, or any protected request coming back 401 (an
+expired/invalid token — see `services/api.ts`'s `ensureOk`), clears the token and drops back to
+the login screen.
+
+`frontend/src/pages/Chat.tsx` is the web platform's chat adapter — it POSTs to the exact same
+`/api/assistant/message` endpoint desktop/voice already use, with `platform="web"`, so a message
+that resolves to a desktop-only tool (e.g. "open vscode") comes back with `ToolExecutor`'s §22
+rejection (`"This action isn't available on web."`) rendered in the chat like any other reply,
+not a silent no-op. The Routine Dashboard's "Run now" button shows the same warning proactively,
+before a run is even attempted, for any routine containing a step whose tool doesn't declare
+`"web"` in its `platforms` (`frontend/src/pages/Routines.tsx`'s `desktopOnlyStepNames`) — purely
+advisory client-side, since `POST /api/routines/{name}/run` (`app/api/routes/routines.py`) is
+what actually enforces it, by inferring `RequesterContext.platform` from whether the request
+itself arrived from loopback (`app.api.local_only.is_local_client`) rather than always assuming
+`"desktop"` the way it used to.
 
 ## Deploy order
 
@@ -135,10 +156,11 @@ order:
 
 Back in Render → `jarvis-api` → Environment, set `CORS_ORIGINS` to the *stable* Vercel URL from
 step 2.6 (exact scheme+host, no path, no trailing slash; comma-separate if you also want a
-specific preview URL allowed). Render redeploys automatically. Reload the Vercel site and confirm
-dashboard requests (Tasks/Routines/Provider Status) fail with `Not authenticated` (expected — see
-[Known limitations](#known-limitations)) rather than a CORS error in the browser console; a CORS
-error means the origin string doesn't match exactly.
+specific preview URL allowed). Render redeploys automatically. Reload the Vercel site: it should
+land on the login page (`frontend/src/pages/Login.tsx`); sign in with the `AUTH_SEED_*`
+credentials and confirm the Chat/Tasks/Routines/Provider Status tabs load real data rather than a
+CORS error in the browser console (a CORS error means the origin string doesn't match exactly) or
+a stuck login (wrong `AUTH_SEED_*` values, or `VITE_API_BASE_URL` pointed at the wrong backend).
 
 ## Known limitations
 
@@ -153,13 +175,6 @@ error means the origin string doesn't match exactly.
   desktop deployment's SQLite file (file 11), which doesn't have this problem. Promoting the
   cloud deployment to a real persistent store (a paid Render disk, or an external Postgres) is
   future work, not done here.
-- **No web login UI yet** — `md-files/12-web-client-vercel.md` prompt 2 (a `frontend/src/pages/
-  Chat.tsx`-style login/chat page) hasn't landed. The dashboards this deploys
-  (Tasks/Routines/Provider Status/Settings) call routes gated by `get_current_user`
-  (`app.api.dependencies`), so until that login UI exists, the deployed frontend can't obtain a
-  token itself — exercise the deployed backend's auth via `curl`/the OpenAPI docs
-  (`/docs` → Authorize) in the meantime, or add the token manually to `localStorage` /
-  browser devtools for now.
 - **Voice and desktop-only tools stay local** — by design (§23, §33): the deployed backend
   always rejects `platform="desktop"` requests (including all of `/api/voice/message`) that
   don't arrive from loopback. This is not a bug to fix in the cloud deployment; it's the

@@ -41,6 +41,19 @@ from fastapi import HTTPException, Request
 LOCAL_CLIENT_HOSTS = {"127.0.0.1", "::1", "localhost"}
 
 
+def is_local_client(request: Request) -> bool:
+    """Whether `request` arrived from this same machine (loopback), per
+    `LOCAL_CLIENT_HOSTS`. Shared by `enforce_desktop_local_only` (raise-if-not-local for
+    an explicit `platform="desktop"` claim) and by routes that have no explicit
+    `platform` on the request body at all but still need to tell a same-machine caller
+    apart from a remote one -- e.g. `app.api.routes.routines.run_routine` (file 12
+    prompt 2), which infers `platform="desktop"` vs `"web"` from this rather than
+    defaulting to `"desktop"` unconditionally the way `RoutineEngine.run()` used to.
+    """
+    client_host = request.client.host if request.client else None
+    return client_host in LOCAL_CLIENT_HOSTS
+
+
 def enforce_desktop_local_only(request: Request, platform: str) -> None:
     """Raise 403 if `platform` is "desktop" and `request` didn't arrive from loopback.
 
@@ -51,8 +64,7 @@ def enforce_desktop_local_only(request: Request, platform: str) -> None:
     if platform != "desktop":
         return
 
-    client_host = request.client.host if request.client else None
-    if client_host not in LOCAL_CLIENT_HOSTS:
+    if not is_local_client(request):
         raise HTTPException(
             status_code=403,
             detail="Requests with platform='desktop' are only accepted from the local machine (localhost).",

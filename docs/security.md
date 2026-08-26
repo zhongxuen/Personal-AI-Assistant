@@ -91,11 +91,18 @@ handler call happens. It's wired into every route that can execute a
 
 `POST /api/routines/{name}/run` (`app/api/routes/routines.py`) was a known gap this
 check didn't originally cover: `RoutineEngine.run()` defaults to a `platform="desktop"`
-`RequesterContext` when the HTTP route doesn't supply one (it never does today), so a
-routine step chain could execute desktop tools through that endpoint without this
-boundary. That gap is now closed, but by the *authentication* layer below rather than
-by widening this loopback check -- see "Authentication" for why, and its own caveat on
-what closing it does and doesn't mean.
+`RequesterContext` when the HTTP route doesn't supply one. Requiring a bearer token
+(see "Authentication" below) closed the "no auth at all" half of that gap, but on its
+own it wouldn't have closed the rest: an *authenticated* remote caller could still have
+triggered a routine's desktop-only steps for real, since nothing tied the context's
+`platform` to where the request actually came from. File 12 prompt 2 closes that
+remaining half directly -- `run_routine` now builds its `RequesterContext` with
+`platform="desktop"` only when `app.api.local_only.is_local_client(request)` is true
+(the same loopback check this section describes, reused as a boolean rather than a
+raise), and `platform="web"` otherwise. A desktop-only routine step run from a remote
+browser is now rejected by `ToolExecutor`'s platform check (§22) the same way a direct
+`open_application` call from the web would be, instead of either executing for real or
+depending solely on authentication to make it safe.
 
 **This is a stopgap, not real authentication for the desktop agent itself.** "Does the
 client socket look like loopback" only works because nothing today puts another host, a
