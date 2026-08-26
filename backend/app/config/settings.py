@@ -3,9 +3,9 @@ Application configuration.
 
 Settings are loaded from environment variables / a `.env` file at the
 repository root, so the app behaves the same whether uvicorn is launched
-from `backend/` or from the repo root. Nothing here is provider-specific
-(no Gemini/Ollama config yet) — that arrives in later phases per
-docs/../md-files/development-plan.md.
+from `backend/` or from the repo root. Provider-specific config (Gemini)
+arrived in file 05; Ollama's is still a placeholder pending file 07 — see
+md-files/development-plan.md.
 """
 
 from functools import lru_cache
@@ -33,10 +33,45 @@ class Settings(BaseSettings):
 
     database_url: str = "sqlite:///./jarvis.db"
 
-    # Placeholders only — unused until file 05 (Gemini) / 07 (Ollama fallback).
-    # Declared now so .env.example is complete from day one (see 01-project-foundation.md).
+    # Gemini (file 05). `gemini_api_key` unset/empty -> GeminiProvider.is_available()
+    # returns False without a network call (§41 Rule 3). `gemini_model` is deliberately
+    # configurable, not hardcoded (§30) -- swap models via env, not code.
     gemini_api_key: str | None = None
+    gemini_model: str = "gemini-2.5-flash"
+    gemini_timeout_seconds: float = 30.0
+    # Retries apply only to RETRYABLE_ERROR (timeout/network/5xx) -- never
+    # QUOTA_EXHAUSTED or PERMANENT_ERROR (§5). This is a *retry* count, so
+    # gemini_max_retries=2 means up to 3 total attempts.
+    gemini_max_retries: int = 2
+    gemini_retry_base_delay_seconds: float = 1.0
+
+    # Ollama fallback -- still just a placeholder until file 07.
     ollama_base_url: str = "http://localhost:11434"
+
+    # Gemini usage budget (§8, file 06+). These are *internal* budgets the app
+    # enforces on itself, deliberately set BELOW Google's actual quota -- they are
+    # placeholders, NOT Google's real Gemini rate limits (§41 Rule 9: never hardcode
+    # the real provider quota, since it can change without notice). Configure via env
+    # to match whatever the account's actual quota/comfort margin is.
+    gemini_daily_request_budget: int = 80
+    # Fraction of the daily budget (0-1) at which QuotaManager.status() reports
+    # WARNING instead of NORMAL.
+    gemini_warning_threshold: float = 0.80
+    # Fraction of the daily budget (0-1) at which QuotaManager.status() reports
+    # CRITICAL instead of WARNING. At/above the full budget (1.0) status is FAILOVER.
+    gemini_critical_threshold: float = 0.90
+
+    # Provider health (§6, file 06). Provider-agnostic -- `HealthManager` applies these
+    # to whichever provider name it's tracking (gemini, ollama, ...), not just Gemini.
+    # Cooldown after a QUOTA_EXHAUSTED result -- never retried before this elapses.
+    llm_quota_cooldown_seconds: float = 60.0
+    # Consecutive RETRYABLE_ERRORs (timeout/network/5xx) before a provider is treated
+    # as temporarily unusable rather than just unlucky once.
+    llm_retryable_error_threshold: int = 3
+    llm_retryable_cooldown_seconds: float = 30.0
+    # Consecutive PERMANENT_ERRORs before a merely MISCONFIGURED provider is escalated
+    # to DISABLED (i.e. stops being retried even after a config fix, until reset()).
+    llm_permanent_error_threshold: int = 3
 
     @property
     def cors_origin_list(self) -> list[str]:

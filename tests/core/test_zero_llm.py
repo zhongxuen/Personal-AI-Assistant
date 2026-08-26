@@ -8,8 +8,11 @@ against the real, fully-registered tool set (`register_default_tools`), and asse
   1. `AssistantResponse.used_llm` is `False` for every one of them (CommandRouter
      resolved them deterministically; NEEDS_LLM was never hit), and
   2. no network call was ever attempted -- `httpx`/`requests` are monkeypatched to raise
-     if called at all, so any accidental LLM/network call would be caught even though
-     no LLM integration exists yet to call one on purpose (that arrives in file 06).
+     if called at all (including `httpx.AsyncClient.send`, the path Gemini's async SDK
+     actually uses -- see file 05), so any accidental LLM/network call would be caught.
+     NEEDS_LLM now does call GeminiProvider for real (file 05); these tests only cover
+     commands that resolve deterministically, so GeminiProvider.generate is never
+     reached and this block never fires for them.
 
 OS-level side effects (launching VS Code/Chrome, the routine's app-open steps) are
 mocked out the same way tests/tools/test_deterministic_tools.py does -- nothing actually
@@ -39,6 +42,10 @@ def _blocked(*_args, **_kwargs):
     raise AssertionError("Network call attempted during a zero-LLM command -- see §38/§9.")
 
 
+async def _blocked_async(*_args, **_kwargs):
+    raise AssertionError("Network call attempted during a zero-LLM command -- see §38/§9.")
+
+
 @pytest.fixture()
 def no_network(monkeypatch):
     """Any attempted `httpx`/`requests` call fails the test immediately instead of
@@ -47,6 +54,10 @@ def no_network(monkeypatch):
     monkeypatch.setattr(httpx.Client, "send", _blocked)
     monkeypatch.setattr(httpx, "get", _blocked)
     monkeypatch.setattr(httpx, "post", _blocked)
+    # google-genai's async SDK (used by GeminiProvider.generate, file 05) sends
+    # through httpx.AsyncClient, not httpx.Client -- without this, a real request
+    # slips out whenever GEMINI_API_KEY happens to be set in the environment.
+    monkeypatch.setattr(httpx.AsyncClient, "send", _blocked_async)
     if requests is not None:  # pragma: no cover - exercised only if requests is installed
         monkeypatch.setattr(requests.sessions.Session, "request", _blocked)
         monkeypatch.setattr(requests, "get", _blocked)
