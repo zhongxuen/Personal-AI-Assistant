@@ -88,6 +88,24 @@ class RunRoutineTool:
         "required": [],
     }
     permission = PermissionLevel.SAFE
+    # Deliberately NOT extended to "web"/"discord" (§22 review, file 12/13): unlike
+    # `create_task`/`list_tasks`/`get_time`/`get_system_info`, this stays desktop-only
+    # on purpose. Two reasons, either one sufficient on its own:
+    #   1. The only routine that exists today ("coding") is a chain of `open_application`
+    #      steps -- itself `platforms=["desktop"]` -- so a non-desktop caller could never
+    #      get past step one anyway.
+    #   2. Unlike `app.api.routes.routines.run_routine` (the Routine Dashboard's REST
+    #      route, file 12 prompt 2), this tool's `handler()` still calls
+    #      `RoutineEngine.run(routine_name)` with no `context` -- `RoutineEngine.run()`
+    #      then defaults to `RequesterContext(platform="desktop", ...)` regardless of who
+    #      actually called `run_routine`. That default is safe *only* because
+    #      `platforms=["desktop"]` here means the real caller already had to be on
+    #      desktop. Adding "discord"/"web" without first threading the real requester
+    #      platform through to `RoutineEngine.run()` (the way the REST route now does)
+    #      would let a non-desktop caller run a desktop-only step chain for real --
+    #      exactly the gap docs/security.md flagged and file 12 prompt 2 closed for the
+    #      REST route, reopened here. Fix that plumbing first if this ever needs to be
+    #      chat-reachable.
     platforms = ["desktop"]
     requires_confirmation = False
 

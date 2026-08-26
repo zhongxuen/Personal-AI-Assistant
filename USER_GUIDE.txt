@@ -1,0 +1,182 @@
+====================================================================
+ JARVIS - Personal AI Assistant
+ New User Guide
+====================================================================
+
+This is a short, plain-language guide to what JARVIS is, what it can
+and can't do today, where you can use it, and how to get started.
+For technical/architecture details see docs/architecture.md and
+README.md instead - this file is written for a first-time user.
+
+
+--------------------------------------------------------------------
+1. WHAT IS JARVIS?
+--------------------------------------------------------------------
+
+JARVIS is a personal AI assistant you talk to in plain English (text,
+and on your own PC, voice). It can:
+
+  - Answer questions and hold a conversation
+  - Run real actions on your behalf ("open VS Code", "start my coding
+    routine") instead of just describing what to do
+  - Manage a to-do list and reminders
+  - Run multi-step "routines" (e.g. one command opens several apps
+    in sequence)
+
+A key design idea: JARVIS does NOT send every message to an AI model.
+Simple, well-understood requests ("what time is it", "remind me to
+submit my assignment tomorrow at 8pm", "open Chrome") are handled by
+plain code instantly and for free. The AI model is only called when
+actual reasoning/understanding is needed. This keeps the assistant
+fast and (as much as possible) free to run.
+
+
+--------------------------------------------------------------------
+2. WHAT IT CAN DO (CAPABILITIES)
+--------------------------------------------------------------------
+
+Available everywhere (desktop, web, Discord, mobile):
+  - Chat / general Q&A, with automatic AI-provider fallback (see
+    section 4)
+  - Tasks: create, list, complete, edit, delete
+  - Reminders scheduled for a specific time ("remind me to X
+    tomorrow at 8pm" - understands natural phrases like "in 2 hours"
+    or "next friday", not just exact dates)
+  - Timers ("set a timer for 10 minutes") with a notification when
+    they finish
+  - Ask what time it is / basic system info
+
+Desktop only (your own Windows PC, running locally):
+  - Open / close applications by name (e.g. "open VS Code")
+  - Run routines: named sequences of actions (e.g. a "coding"
+    routine that opens your editor, project folder, and browser)
+  - Read/write the clipboard
+  - Open, search for, and create files (restricted to a configured
+    set of folders - see section 3)
+  - Run a small, allow-listed set of terminal commands (NOT a general
+    shell - see section 3)
+  - Native desktop notifications
+  - List/inspect running processes
+  - Voice input (speech-to-text) and voice output (text-to-speech),
+    fully offline, no cloud service involved
+
+Under the hood:
+  - Everything JARVIS can do is a distinct "tool" with its own
+    permission level (safe to run automatically, needs your
+    confirmation first, or off by default). Destructive actions
+    (deleting a task, closing an app, overwriting the clipboard,
+    creating a file) always ask for confirmation first.
+
+
+--------------------------------------------------------------------
+3. LIMITS - WHAT IT WON'T / CAN'T DO
+--------------------------------------------------------------------
+
+  - Desktop-only tools (opening apps, terminal, clipboard, files,
+    notifications, voice, process list) simply are not offered on
+    the web app, Discord, or mobile - there is no local machine for
+    those platforms to act on. Asking for one there gets a clear
+    "this action isn't available here" reply, not a silent failure.
+
+  - The terminal tool only runs a short allow-listed set of known-
+    safe commands. It is not a general shell, and it will never run
+    an arbitrary command an AI model or user makes up on the spot.
+
+  - File tools are sandboxed to a configured list of folders (by
+    default your Desktop/Documents) - they cannot read or write
+    anywhere on disk.
+
+  - AI (LLM) usage has a daily budget, because the primary provider
+    (Google Gemini) has a free-tier quota. If that budget or quota
+    runs out, JARVIS automatically falls back to a local model
+    (Ollama) if you have one installed and running; if neither is
+    available, it degrades gracefully and tells you it can't reason
+    about that particular request right now, rather than hanging or
+    crashing. Deterministic commands (tasks, timers, opening a named
+    app, etc.) keep working regardless, since they never needed the
+    AI model in the first place.
+
+  - Voice (speech-to-text / text-to-speech) only works on the
+    desktop app running on your own machine - it is not available
+    through the web app, Discord, or mobile.
+
+  - Data is stored in a local/simple database file (SQLite) by
+    default. This is fine for personal, single-user use, but it is
+    not a production-grade, multi-user database.
+
+  - The mobile platform is newly added and intentionally minimal for
+    now (it reuses the same chat API as the web app) - expect it to
+    grow over time rather than being feature-complete today.
+
+
+--------------------------------------------------------------------
+4. HOW THE AI SIDE WORKS (SHORT VERSION)
+--------------------------------------------------------------------
+
+  Primary:   Google Gemini (free-tier API)
+  Fallback:  Ollama (a model running locally on your own machine)
+  If both are unavailable, JARVIS says so instead of guessing.
+
+You never have to manually switch providers - if Gemini is rate-
+limited, times out, or errors, JARVIS automatically retries and
+fails over on its own.
+
+
+--------------------------------------------------------------------
+5. WHERE YOU CAN USE IT (PLATFORMS)
+--------------------------------------------------------------------
+
+  Desktop
+    Runs directly on your own Windows PC. The only place with the
+    full tool set, including apps/files/terminal/clipboard/voice.
+
+  Web app
+    A browser-based chat UI (Tasks / Routines / Provider Status /
+    Settings tabs). Log in with an account; works from any browser.
+    Desktop-only actions are politely refused here.
+
+  Discord
+    Add/mention the bot in a server, or DM it. Message it starting
+    with "Jarvis," or an @-mention, e.g.:
+      "Jarvis, what are my tasks today?"
+    Same capabilities as the web app (no desktop-only tools).
+
+  Mobile
+    Uses the same underlying chat API as the web app, under a
+    "mobile" platform label. Same capability set as web today.
+
+In every case except the desktop app itself, you log in with a
+regular username/password to get an access token - there's no
+separate "mobile-only" or "Discord-only" account system.
+
+
+--------------------------------------------------------------------
+6. GETTING STARTED
+--------------------------------------------------------------------
+
+See README.md for exact setup commands (Python/Node prerequisites,
+installing dependencies, environment variables). In short:
+
+  1. Set up the backend (Python/FastAPI) and frontend (React) as
+     described in README.md, and fill in your .env file.
+  2. Start the backend, then the frontend (or use the already-
+     deployed web link if one has been shared with you).
+  3. Log in with your account.
+  4. Try a few things:
+       "What time is it?"
+       "Remind me to check my email in 30 minutes"
+       "Add a task: finish the report, due tomorrow at 5pm"
+       "What are my tasks today?"
+     and, on desktop only:
+       "Open VS Code"
+       "Start my coding routine"
+
+If something isn't available on the platform you're using, JARVIS
+will tell you plainly rather than pretending it worked.
+
+
+--------------------------------------------------------------------
+That's it - this file covers the basics. For architecture, security
+model, and deployment details, see docs/architecture.md,
+docs/security.md, and docs/deployment.md.
+====================================================================

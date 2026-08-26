@@ -6,6 +6,8 @@ AssistantCore-backed /api/assistant/message route (Phase 1, deterministic
 tool routing only -- no LLM layer yet). See md-files/development-plan.md.
 """
 
+import asyncio
+import contextlib
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -27,6 +29,7 @@ from app.config.logging import configure_logging
 from app.config.settings import get_settings
 from app.database import models  # noqa: F401  (import registers models on Base.metadata)
 from app.database.database import Base, SessionLocal, engine
+from app.platforms.discord import run_discord_bot
 from app.routines.scheduler import RoutineScheduler
 from app.tasks.scheduler import ReminderScheduler
 from app.tools import register_default_tools
@@ -88,8 +91,15 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         )
     # Phase 3 (file 04): start polling task_reminders for due reminders.
     reminder_scheduler.start()
+    # File 13: Discord bot, sharing this same event loop -- a no-op task if
+    # DISCORD_BOT_TOKEN isn't configured (see run_discord_bot's docstring), so this
+    # never blocks/breaks startup on a machine without a Discord app set up.
+    discord_bot_task = asyncio.create_task(run_discord_bot())
     yield
     reminder_scheduler.shutdown()
+    discord_bot_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await discord_bot_task
 
 
 app = FastAPI(title="JARVIS API", version="0.0.1", lifespan=lifespan)

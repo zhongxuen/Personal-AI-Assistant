@@ -23,7 +23,7 @@ from app.database.models import Task
 from app.tasks.service import UNSET, VALID_PRIORITIES, TaskService
 from app.tools.base import ToolResult
 
-PLATFORMS = ["desktop", "web", "discord"]
+PLATFORMS = ["desktop", "web", "discord", "mobile"]
 
 _PRIORITY_ERROR = f"Priority must be one of: {', '.join(VALID_PRIORITIES)}."
 

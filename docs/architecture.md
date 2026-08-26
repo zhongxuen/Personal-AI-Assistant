@@ -79,3 +79,100 @@ the split would run along:
 This is *not* built now — today's deployment is still the one-process shape above, and the
 desktop-only tools simply sit dormant (never reachable) on the Render deployment. The split is
 future work, tracked here so a future change doesn't have to rediscover this seam.
+
+## How to add a new platform adapter
+
+This is the pattern files 12 (web) and 13 (Discord) both followed to plug a new client into
+`AssistantCore` without adding any platform-specific business logic (§41 Rule 7). The contract is
+`PlatformAdapter` (`backend/app/platforms/base.py`):
+
+```python
+class PlatformAdapter(Protocol):
+    def to_request(self, raw_input: Any) -> AssistantRequest: ...
+    def to_platform_output(self, response: AssistantResponse) -> Any: ...
+```
+
+`AssistantCore.handle()` only ever sees an `AssistantRequest` in, `AssistantResponse` out — it has
+no idea what platform called it. Everything platform-specific (parsing a native message shape,
+stripping a bot-mention prefix, rendering a reply, enforcing the right trust boundary) lives in the
+adapter or the route/bot wiring around it, never inside `AssistantCore`/`ToolExecutor`.
+
+Two adapter shapes exist today, and a new platform is usually closer to one or the other:
+
+- **Server-side adapter class** — `DiscordAdapter` (`backend/app/platforms/discord.py`). The
+  native input (a `discord.py` `Message`) isn't JSON the client controls, so a real class
+  implements `to_request`/`to_platform_output`, and a bot event handler (`build_discord_client`'s
+  `on_message`) calls it and then `AssistantCore.handle()` directly — no HTTP hop.
+- **Thin client + shared HTTP route** — the web platform. `backend/app/platforms/web.py` is
+  intentionally a stub; the "adapter" is the frontend itself (`frontend/src/pages/Chat.tsx` /
+  `frontend/src/services/api.ts`) building an already-`AssistantRequest`-shaped JSON body with
+  `platform="web"` and POSTing it to the one shared `POST /api/assistant/message` route
+  (`backend/app/api/routes/assistant.py`), the same endpoint desktop and Discord ultimately funnel
+  through. Use this shape when the native input is already something a browser/HTTP client can
+  produce directly — don't write a no-op server-side class just to satisfy the pattern.
+
+### Concrete steps
+
+1. **Implement `to_request`/`to_platform_output` for the new native format.** Convert the
+   platform's native message shape into an `AssistantRequest` (`backend/app/core/models.py`):
+   `user_id` from whatever identifies the sender on that platform, `conversation_id` from
+   whatever scopes a conversation there (channel/thread/session id), `message` with any
+   platform chrome stripped (Discord strips a leading `@mention` or `"Jarvis,"` prefix via
+   `_strip_bot_prefix`). `to_platform_output` renders `AssistantResponse.text` back into
+   whatever the platform can send — respect any hard native limits (Discord's 2000-character
+   message cap gets truncated in `DiscordAdapter.to_platform_output`).
+2. **Set the platform name on `AssistantRequest`.** `platform` is a plain string
+   (`"desktop" | "web" | "discord" | ...`, `backend/app/core/models.py`) — pick the new
+   platform's literal here; it's what every downstream check (`ToolExecutor`, `local_only`,
+   the tests) matches against. Don't invent a second field for this.
+3. **Wire the right auth boundary — public vs. local-only.** `backend/app/api/routes/assistant.py`
+   splits into exactly two boundaries and a new platform must land in the public one:
+   - `platform="desktop"` is the only local-only case, gated by
+     `enforce_desktop_local_only` (`backend/app/api/local_only.py`) — loopback-only, no
+     bearer token. This boundary is not something a new remote platform should ever join.
+   - every other platform (web, discord, and your new one) requires a valid bearer token via
+     `get_optional_current_user`, and the route overwrites `request.user_id` with the
+     authenticated user's own identity rather than trusting the client-supplied value. If the
+     new platform talks over the shared HTTP route (the "thin client" shape above), this
+     happens automatically. If it's a server-side adapter calling `AssistantCore.handle()`
+     directly (the Discord shape), the adapter's own entry point is responsible for
+     establishing who the caller is *before* building the request — Discord does this via the
+     bot token/Discord's own auth, not this route's bearer-token check.
+4. **Extend relevant tools' `platforms` lists.** Each tool declares
+   `platforms: list[str]` (`backend/app/tools/base.py`); `ToolExecutor` rejects any call where
+   `context.platform not in tool.platforms` with `"This action isn't available on
+   {platform}."` (`backend/app/core/tool_executor.py`) — that's the actual capability-rejection
+   message; don't invent friendlier flavor text elsewhere. Go through the existing tools
+   (`backend/app/tools/*.py`) and add the new platform's name to the ones that make sense for a
+   chat-based/remote client (tasks, timers, routine status, `get_time`, etc. already list
+   `["desktop", "web", "discord"]` or similar). Do **not** add it to tools that stay
+   `platforms = ["desktop"]` — `applications.py`, `clipboard.py`, `files.py`, `terminal.py`,
+   `notifications.py`, and the process-control tools in `system.py` — those are the desktop-only
+   set from file 11 and must stay unreachable from any remote platform.
+5. **Add adapter + capability tests.** Follow the two-file split from
+   `tests/platforms/test_discord_adapter.py` / `test_discord_capability.py`:
+   - a pure adapter unit test (no `AssistantCore`, no DB) that mocks the native input and
+     asserts `to_request()` maps fields correctly (platform, user_id, conversation_id, cleaned
+     message) and `to_platform_output()` renders correctly, including any native limits;
+   - an end-to-end capability test that runs a real request through the adapter and
+     `AssistantCore`, asserting an allowed action (e.g. "what are my tasks?") resolves normally
+     and a desktop-only action (e.g. "open VS Code") gets the exact
+     `"This action isn't available on {platform}."` rejection, never a silent no-op or an
+     actual execution attempt.
+   Also extend `tests/core/test_platform_capability.py` with a case for the new platform if it
+   isn't already covered there generically.
+
+### Checklist
+
+- [ ] `to_request`/`to_platform_output` implemented (or the thin-client shape used, if the
+      native input is already producible as JSON)
+- [ ] `AssistantRequest.platform` set to the new platform's literal string
+- [ ] New platform wired to the **public** auth boundary (`get_optional_current_user`) — never
+      folded into `enforce_desktop_local_only`
+- [ ] `platforms` list extended on tools that make sense for the new platform; **not** added to
+      any `platforms = ["desktop"]` tool
+- [ ] Adapter unit tests (field mapping, native-format rendering) added
+- [ ] End-to-end capability test added: one allowed action resolves normally, one desktop-only
+      action gets the `"This action isn't available on {platform}."` rejection
+- [ ] No new business logic added inside the adapter or route — everything still routes through
+      the same `AssistantCore.handle()` every other platform calls

@@ -139,6 +139,13 @@ class Settings(BaseSettings):
     auth_seed_username: str | None = None
     auth_seed_password: str | None = None
 
+    # Discord adapter (§37 Phase 12, file 13). Backend-only secret -- never sent to
+    # any frontend, never committed as a real value (see .env.example). Unset ->
+    # `run_discord_bot()` logs and no-ops rather than trying to connect, so a dev
+    # machine without a Discord app configured is unaffected (same "absence is a
+    # valid, non-crashing state" convention as gemini_api_key above).
+    discord_bot_token: str | None = None
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]

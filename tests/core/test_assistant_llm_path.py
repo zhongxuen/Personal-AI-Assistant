@@ -30,6 +30,7 @@ from app.core.permissions import PermissionLevel
 from app.llm.base import LLMResult, ToolCallRequest
 from app.tools.base import ToolResult
 from app.tools.registry import ToolRegistry
+from app.tools.tasks import create_task_tool
 
 # Never matches any trigger/alias registered below -- CommandRouter always falls
 # through to classification LLM_REQUIRED for it, regardless of what's in the registry.
@@ -151,3 +152,40 @@ def test_quota_exhausted_message_is_specific_to_quota():
     response = core.handle(_request())
 
     assert "quota" in response.text.lower()
+
+
+def test_dod_create_a_task_phrase_resolves_via_llm_and_actually_creates_a_task(test_db):
+    """development-plan.md §40's literal DoD phrasing, "Create a task to finish my
+    portfolio.", has no matching CommandRouter alias -- only "remind me to ..." is
+    registered for `create_task` (see `app/tools/__init__.py`) -- so, unlike every other
+    create_task test in this suite (tests/core/test_zero_llm.py,
+    tests/api/test_tasks.py, tests/platforms/test_discord_capability.py, all of which go
+    through the deterministic "remind me to" alias), this message genuinely falls
+    through to classification LLM_REQUIRED and depends on Gemini choosing to call
+    `create_task` as a tool -- the same LLM-requests-a-tool-call path this file already
+    proves for a RESTRICTED fake tool above, exercised here against the real
+    `create_task_tool` (+ `test_db`, so it actually persists) to prove the DoD scenario
+    itself, not just the plumbing in the abstract.
+    """
+    registry = ToolRegistry()
+    registry.register(create_task_tool)
+    core = AssistantCore(registry, db=None)
+    core.ai_router.route = AsyncMock(
+        return_value=LLMResult(
+            status="SUCCESS",
+            tool_calls=[
+                ToolCallRequest(tool_name="create_task", params={"title": "finish my portfolio"})
+            ],
+        )
+    )
+
+    request = AssistantRequest(
+        user_id="u1", platform="desktop", message="Create a task to finish my portfolio."
+    )
+    response = core.handle(request)
+
+    assert response.used_llm is True
+    call = response.tool_calls[0]
+    assert call["tool_name"] == "create_task"
+    assert call["result"]["success"] is True
+    assert call["result"]["data"]["title"] == "finish my portfolio"

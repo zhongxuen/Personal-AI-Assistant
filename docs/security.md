@@ -128,7 +128,7 @@ Every route that isn't part of the desktop-only local boundary above is a
   route on it requires a token unconditionally -- there's no route on these routers
   that's meant to be reachable without one.
 - `POST /api/assistant/message` when `request.platform != "desktop"` -- this one route
-  is genuinely mixed traffic (desktop *and* web/discord all funnel through it), so it
+  is genuinely mixed traffic (desktop *and* web/discord/mobile all funnel through it), so it
   can't use the same router-level `dependencies=[...]`: whether a token is required
   depends on the request *body*, which FastAPI dependencies can't see before they run.
   `app/api/routes/assistant.py` resolves the token via `get_optional_current_user`

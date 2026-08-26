@@ -10,7 +10,7 @@ and Ollama's `httpx.get`/`httpx.AsyncClient.post` (same seam as
 `test_ollama_provider.py`) -- so none of this ever requires a real `GEMINI_API_KEY` or
 an actual Ollama server running, in CI or locally.
 
-Covers the four required scenarios:
+Covers the five required scenarios (§38):
   1. Gemini healthy -> Gemini answers, Ollama is never called, fallback_used=False.
   2. Gemini QUOTA_EXHAUSTED -> AIRouter automatically tries Ollama next in the same
      request (no user intervention), Ollama succeeds, fallback_used=True.
@@ -18,6 +18,12 @@ Covers the four required scenarios:
      underlying Gemini HTTP call at all, Ollama is used directly.
   4. Both providers unavailable/failing -> AIRouter returns a graceful, clearly-marked
      result without raising and without a blank SUCCESS.
+  5. Gemini times out on every retry -> RETRYABLE_ERROR, AIRouter fails over to Ollama
+     in the same request, same as the QUOTA_EXHAUSTED case in scenario 2 (§38 item 5 --
+     previously only proven piecemeal: test_gemini_provider.py shows a real timeout
+     yields RETRYABLE_ERROR, test_ai_router.py shows AIRouter fails over on
+     RETRYABLE_ERROR, but never together against the real GeminiProvider/OllamaProvider
+     pair the way scenarios 1-4 are).
 """
 
 from __future__ import annotations
@@ -240,6 +246,49 @@ async def test_gemini_quota_exhausted_fails_over_to_ollama_in_same_request(test_
 
     rows = {row.provider: row for row in session.query(LLMUsage).all()}
     assert rows["gemini"].status == "QUOTA_EXHAUSTED"
+    assert rows["gemini"].fallback_used is False
+    assert rows["ollama"].status == "SUCCESS"
+    assert rows["ollama"].fallback_used is True
+
+
+# ---------------------------------------------------------------------------
+# 2b. Gemini times out on every attempt -> RETRYABLE_ERROR after exhausting retries
+#     -> AIRouter automatically calls Ollama in the same request, exactly like the
+#     QUOTA_EXHAUSTED case above.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_gemini_timeout_fails_over_to_ollama_in_same_request(test_db, monkeypatch):
+    session = test_db()
+    settings = _settings(gemini_max_retries=2)  # 1 initial attempt + 2 retries, all time out
+
+    generate_content = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
+    gemini = _gemini_provider(settings, generate_content, db=session)
+
+    ollama = OllamaProvider(settings=settings, db=session)
+    _patch_ollama_tags_probe(monkeypatch, response=_tags_response(["llama3.2:latest"]))
+    _patch_ollama_chat_endpoint(
+        monkeypatch,
+        [_FakeOllamaChatResponse(200, {"message": {"content": "ollama answer"}})],
+    )
+
+    router = _router(gemini, ollama)
+
+    result = await router.route(LLMRequest(message="hello"))
+
+    assert result.status == "SUCCESS"
+    assert result.text == "ollama answer"
+    assert generate_content.await_count == 3  # exhausted all retries before failing over
+
+    rows = {row.provider: row for row in session.query(LLMUsage).all()}
+    assert rows["gemini"].status == "RETRYABLE_ERROR"
+    # httpx.TimeoutException subclasses httpx.HTTPError, so `_generate` classifies it
+    # as a network error rather than the literal string "timeout" (that value is
+    # reserved for a bare asyncio.TimeoutError/TimeoutError -- see gemini.py's except
+    # chain) -- what matters for §38 item 5 is the RETRYABLE_ERROR status that makes
+    # AIRouter fail over, not the exact label.
+    assert rows["gemini"].error_type == "network_error:TimeoutException"
     assert rows["gemini"].fallback_used is False
     assert rows["ollama"].status == "SUCCESS"
     assert rows["ollama"].fallback_used is True

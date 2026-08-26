@@ -1,7 +1,7 @@
 """
 Platform capability tests (§22, extended file 11 prompt 3).
 
-Registers a desktop-only tool and a tool available on desktop/web/discord,
+Registers a desktop-only tool and a tool available on desktop/web/discord/mobile,
 and asserts ToolExecutor rejects the desktop-only tool for an unsupported
 platform (with a clear explanatory error) while accepting it for a
 supported one.
@@ -19,6 +19,8 @@ scenario development-plan.md §22's own example names -- a web-originated reques
 `open_application` -- run against the real tool, not `FakeTool`, and additionally
 proves the rejection isn't just *labeled* a failure but actually never attempts to
 launch anything (`os.startfile` is patched and asserted uncalled).
+`test_open_application_rejected_on_mobile_platform` (file 14) is the same scenario for
+the mobile platform, added when `platforms` lists were extended with `"mobile"`.
 """
 
 from __future__ import annotations
@@ -58,7 +60,7 @@ def _executor() -> tuple[ToolExecutor, FakeTool, FakeTool]:
     registry = ToolRegistry()
     desktop_only = FakeTool(name="desktop_only_tool", platforms=["desktop"])
     all_platforms = FakeTool(
-        name="cross_platform_tool", platforms=["desktop", "web", "discord"]
+        name="cross_platform_tool", platforms=["desktop", "web", "discord", "mobile"]
     )
     registry.register(desktop_only)
     registry.register(all_platforms)
@@ -89,11 +91,11 @@ def test_desktop_only_tool_accepted_on_desktop():
 def test_cross_platform_tool_accepted_on_every_declared_platform():
     executor, _desktop_only, all_platforms = _executor()
 
-    for platform in ["desktop", "web", "discord"]:
+    for platform in ["desktop", "web", "discord", "mobile"]:
         result = executor.execute(all_platforms.name, {}, _context(platform))
         assert result.success is True
 
-    assert all_platforms.calls == 3
+    assert all_platforms.calls == 4
 
 
 def test_real_desktop_tool_rejected_on_unsupported_platform():
@@ -132,4 +134,26 @@ def test_open_application_rejected_on_web_platform(monkeypatch):
     assert result.success is False
     assert result.error is not None
     assert "web" in result.error.lower()
+    assert launched == []
+
+
+def test_open_application_rejected_on_mobile_platform(monkeypatch):
+    """Same §22 scenario as `test_open_application_rejected_on_web_platform`, for the
+    mobile platform (file 14) -- `platform="mobile"` sits at the same trust tier as
+    "web" (see `app/tools/tasks.py`/`system.py`/`timers.py`'s `platforms` lists), but
+    `open_application` itself stays `platforms=["desktop"]`, so it must still be
+    rejected, not silently allowed just because "mobile" is a newer platform string.
+    """
+    launched: list[str] = []
+    monkeypatch.setattr("os.startfile", lambda path: launched.append(path), raising=False)
+
+    registry = ToolRegistry()
+    registry.register(open_application_tool)
+    executor = ToolExecutor(registry)
+
+    result = executor.execute(open_application_tool.name, {"app_name": "vscode"}, _context("mobile"))
+
+    assert result.success is False
+    assert result.error is not None
+    assert "mobile" in result.error.lower()
     assert launched == []

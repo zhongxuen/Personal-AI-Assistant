@@ -73,7 +73,7 @@ class StartTimerTool:
         "required": ["minutes"],
     }
     permission = PermissionLevel.SAFE
-    platforms = ["desktop", "web", "discord"]
+    platforms = ["desktop", "web", "discord", "mobile"]
     requires_confirmation = False
 
     def __init__(self, registry: ToolRegistry) -> None:

@@ -8,7 +8,14 @@ zero-LLM CommandRouter -> ToolExecutor -> Tool.handler path end to end (§9, §4
 `list_processes`/`get_process_info` (file 11, Desktop Agent Expansion, §23) are read-only
 `psutil` process inspection -- SAFE like the two above, since listing/inspecting processes
 by itself changes nothing on the machine (unlike `close_application`'s CONFIRM-gated
-`terminate()`).
+`terminate()`). They stay `platforms = ["desktop"]`: process inspection is about *this
+machine*, the same category of capability as `open_application`/file operations/
+clipboard/terminal (§22) -- a web or Discord requester has no local machine to ask about.
+
+`get_time`/`get_system_info` are different in kind: they answer a question ("what time
+is it", "how's this machine doing") with plain text, no control over anything, so they're
+also reachable from `["desktop", "web", "discord", "mobile"]` (§22) -- a chat-based
+interface can ask either one same as a task/timer command.
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ class GetTimeTool:
     description = "Get the current local date and time."
     parameters: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
     permission = PermissionLevel.SAFE
-    platforms = ["desktop"]
+    platforms = ["desktop", "web", "discord", "mobile"]
     requires_confirmation = False
     # Deliberately NOT cacheable (see app.core.cache.ResponseCache's docstring): safe
     # and side-effect-free, but its whole point is to be exact to the current second,
@@ -55,7 +62,7 @@ class GetSystemInfoTool:
     description = "Get basic OS, CPU, and memory information about this machine."
     parameters: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
     permission = PermissionLevel.SAFE
-    platforms = ["desktop"]
+    platforms = ["desktop", "web", "discord", "mobile"]
     requires_confirmation = False
     # Cacheable (see app.core.cache.ResponseCache's docstring): safe, side-effect-free,
     # and a snapshot that's fine to serve a few seconds stale -- unlike get_time, no

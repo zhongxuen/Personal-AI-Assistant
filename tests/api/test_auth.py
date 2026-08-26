@@ -10,11 +10,14 @@ dependencies work end to end):
      credentials/unknown username are both rejected the same way (no user
      enumeration), a missing user table row is rejected.
   2. Every "non-desktop-local" route (§34: tasks/routines/memory/llm-usage dashboards,
-     and platform="web" requests to /api/assistant/message) rejects an unauthenticated
-     or invalid-token request and accepts one carrying a valid token from (1) --
-     while `platform="desktop"` requests to the same /api/assistant/message endpoint
-     stay ungated by this layer entirely (file 11's separate loopback boundary), which
-     `test_desktop_local_only_endpoints_do_not_require_a_token` confirms directly.
+     and platform="web"/"mobile" requests to /api/assistant/message) rejects an
+     unauthenticated or invalid-token request and accepts one carrying a valid token
+     from (1) -- while `platform="desktop"` requests to the same /api/assistant/message
+     endpoint stay ungated by this layer entirely (file 11's separate loopback
+     boundary), which `test_desktop_local_only_endpoints_do_not_require_a_token`
+     confirms directly. The "mobile" case (file 14) is covered here rather than
+     re-proven in its own file precisely because this boundary is platform-agnostic --
+     see app/platforms/mobile.py's docstring.
 """
 
 from __future__ import annotations
@@ -133,6 +136,27 @@ def test_assistant_message_accepts_web_platform_with_valid_token(client):
     response = client.post(
         "/api/assistant/message",
         json={"user_id": "someone-else", "platform": "web", "message": "hello"},
+        headers=_auth_headers(client),
+    )
+    assert response.status_code == 200
+
+
+def test_assistant_message_rejects_mobile_platform_with_no_token(client):
+    """Same boundary as the "web" case above, for the mobile platform (file 14) --
+    `platform="mobile"` gets the public auth boundary automatically since it's keyed
+    on `request.platform != "desktop"`, not an allowlist of known platform strings.
+    """
+    response = client.post(
+        "/api/assistant/message",
+        json={"user_id": "someone-else", "platform": "mobile", "message": "hello"},
+    )
+    assert response.status_code == 401
+
+
+def test_assistant_message_accepts_mobile_platform_with_valid_token(client):
+    response = client.post(
+        "/api/assistant/message",
+        json={"user_id": "someone-else", "platform": "mobile", "message": "hello"},
         headers=_auth_headers(client),
     )
     assert response.status_code == 200
