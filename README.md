@@ -3,9 +3,6 @@
 A modular, quota-efficient personal AI assistant. See [`md-files/development-plan.md`](md-files/development-plan.md)
 for the full architecture and phased build order — that document is the source of truth for scope and sequencing.
 
-**New user?** Start with [`USER_GUIDE.txt`](USER_GUIDE.txt) for a plain-language rundown of what
-JARVIS can do, its limits, and how to use it on desktop, web, Discord, and mobile.
-
 **Status:** Core assistant loop, tasks/routines/timers, and automatic Gemini→Ollama LLM failover
 are all in place. The assistant runs on desktop (CLI/local agent), a deployed web client
 (Vercel + Render), a Discord bot, and (newly) a mobile-facing API client. See
@@ -20,7 +17,6 @@ frontend/        React + Vite + TypeScript + Tailwind
 tests/           Backend test suite (pytest)
 md-files/        Planning docs (gitignored)
 docs/            Architecture, security, deployment notes
-USER_GUIDE.txt   Plain-language guide for new users
 ```
 
 ## Prerequisites
