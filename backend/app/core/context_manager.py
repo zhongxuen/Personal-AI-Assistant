@@ -12,16 +12,20 @@ Conversation turns come from the `conversations`/`conversation_messages` tables 
 defined in `app.database.models`, file 01) -- `AssistantRequest.conversation_id` is the
 string form of a `Conversation.id` primary key. Nothing in the codebase persists turns
 into those tables yet (no platform adapter/AssistantCore writes them -- that's a future
-phase's job, likely alongside file 09), so today `_recent_turns` almost always returns
-`[]`; the bounding logic is exercised now by test_context_reduction.py seeding rows
-directly, and stays correct once a write path lands. Until then, `conversation_id` not
-parsing as an int, or matching no persisted conversation, is not an error (§41 Rule 3)
--- it just means no history is available for this turn.
+phase's job), so today `_recent_turns` almost always returns `[]`; the bounding logic is
+exercised now by test_context_reduction.py seeding rows directly, and stays correct
+once a write path lands. Until then, `conversation_id` not parsing as an int, or
+matching no persisted conversation, is not an error (§41 Rule 3) -- it just means no
+history is available for this turn.
 
-Memory retrieval is intentionally a guarded optional import, not a hard dependency: file
-09 (`app.memory.retrieval.retrieve_relevant`) doesn't exist yet. `_relevant_memory`
-degrades to a no-op (empty dict) whenever that module is absent, or if it raises, so this
-file never requires file 09 to be built to work today (per file 08 prompt 3's ask).
+Memory retrieval goes through `app.memory.retrieval.retrieve_relevant` (file 09 prompt
+3), which maps the message's classified tool category (`app.tools.relevance`) to the
+`MemoryService` categories worth pulling -- see that module's docstring for the actual
+category mapping. `_relevant_memory` keeps the import guarded (rather than a hard
+top-level import) and still degrades to a no-op (empty dict) if that module is ever
+absent or raises, so a memory-layer bug never takes down context building for the rest
+of the turn (§41 Rule 3) -- but in normal operation this is real retrieval, not a
+placeholder.
 """
 
 from __future__ import annotations
@@ -76,14 +80,11 @@ def _recent_turns(db: Session | None, conversation_id: str | None, limit: int = 
 
 
 def _relevant_memory(message: str) -> dict[str, Any]:
-    """Whatever memory (file 09) is relevant to `message`, or `{}` if the memory
-    system doesn't exist yet / errors -- see module docstring. `app.memory.retrieval.
-    retrieve_relevant` is the name file 09's own plan (md-files/09-memory-system.md,
-    prompt 3) already commits to, so this hook needs no changes once that lands --
-    only the `try/except ImportError` guard becomes dead code.
+    """Whatever memory (file 09, `app.memory.retrieval.retrieve_relevant`) is relevant
+    to `message`, or `{}` if that module is absent / errors -- see module docstring.
     """
     try:
-        from app.memory.retrieval import retrieve_relevant  # type: ignore[import-not-found]
+        from app.memory.retrieval import retrieve_relevant
     except ImportError:
         return {}
 

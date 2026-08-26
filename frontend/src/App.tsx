@@ -3,13 +3,16 @@ import { StatusPage } from './pages/StatusPage'
 import { TasksPage } from './pages/Tasks'
 import { RoutinesPage } from './pages/Routines'
 import { ProviderStatusPage } from './pages/ProviderStatus'
+import { SettingsPage } from './pages/Settings'
+import { VoiceControl } from './components/VoiceControl'
 
-type View = 'status' | 'tasks' | 'routines' | 'providers'
+type View = 'status' | 'tasks' | 'routines' | 'providers' | 'settings'
 
 const TABS: { id: View; label: string }[] = [
   { id: 'tasks', label: 'Tasks' },
   { id: 'routines', label: 'Routines' },
   { id: 'providers', label: 'AI Providers' },
+  { id: 'settings', label: 'Settings' },
   { id: 'status', label: 'Status' },
 ]
 
@@ -34,7 +37,9 @@ function App() {
       {view === 'tasks' && <TasksPage />}
       {view === 'routines' && <RoutinesPage />}
       {view === 'providers' && <ProviderStatusPage />}
+      {view === 'settings' && <SettingsPage />}
       {view === 'status' && <StatusPage />}
+      <VoiceControl />
     </div>
   )
 }

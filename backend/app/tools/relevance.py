@@ -26,6 +26,12 @@ matches both "application" and "task") -- the result is the union of every match
 category's tools, still filtered down to whatever the caller actually passed in
 `all_tools` (this function only narrows, it never adds a tool the caller didn't already
 offer).
+
+`classify_categories` (the keyword-matching step itself, split out from tool-name
+lookup) is exported for `app.memory.retrieval` (file 09 prompt 3) to reuse -- the same
+message classification that decides which *tools* are relevant also decides which
+*memory categories* are relevant, so there's one classifier, not two independently
+drifting copies of `_CATEGORY_KEYWORDS`.
 """
 
 from __future__ import annotations
@@ -66,21 +72,31 @@ _CATEGORY_TOOL_NAMES: dict[str, list[str]] = {
 DEFAULT_TOOL_NAMES: list[str] = ["list_tasks", "create_task", "get_time"]
 
 
-def select_relevant_tools(message: str, all_tools: list[Tool]) -> list[Tool]:
-    """Narrow `all_tools` to the ones plausibly relevant to `message`.
-
-    Lowercases `message` and checks it against each category's keyword list in
-    `_CATEGORY_KEYWORDS`; every matching category contributes its tools (via
-    `_CATEGORY_TOOL_NAMES`), and the result is their union, filtered to tools actually
-    present in `all_tools`. If no category matches, falls back to `DEFAULT_TOOL_NAMES`
-    (see its docstring above for what "default" means and why).
+def classify_categories(message: str) -> list[str]:
+    """Which of `_CATEGORY_KEYWORDS`' categories `message` plausibly belongs to --
+    zero, one, or several. Lowercases `message` and checks it as a plain substring
+    match against each category's keyword list; see the module docstring for why this
+    is deliberately dumb keyword matching rather than anything ML-based, and why the
+    result can be more than one category.
     """
     lowered = message.lower()
-    matched_categories = [
+    return [
         category
         for category, keywords in _CATEGORY_KEYWORDS.items()
         if any(keyword in lowered for keyword in keywords)
     ]
+
+
+def select_relevant_tools(message: str, all_tools: list[Tool]) -> list[Tool]:
+    """Narrow `all_tools` to the ones plausibly relevant to `message`.
+
+    Classifies `message` via `classify_categories`; every matching category
+    contributes its tools (via `_CATEGORY_TOOL_NAMES`), and the result is their union,
+    filtered to tools actually present in `all_tools`. If no category matches, falls
+    back to `DEFAULT_TOOL_NAMES` (see its docstring above for what "default" means and
+    why).
+    """
+    matched_categories = classify_categories(message)
 
     if matched_categories:
         selected_names = {

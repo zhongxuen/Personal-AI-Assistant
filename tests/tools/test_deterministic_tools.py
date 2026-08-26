@@ -1,10 +1,14 @@
 """
-Deterministic tool tests (§37 Phase 2 / file 03, §38).
+Deterministic tool tests (§37 Phase 2 / file 03, §38, promoted file 09 prompt 2).
 
 One test per tool built in this file, plus the `run_routine` end-to-end path:
   - get_time returns a value
   - open_application resolves an alias to the right launch command (the real OS launch
-    call is mocked -- nothing actually opens)
+    call is mocked -- nothing actually opens). Resolution now goes through
+    `MemoryService`'s "applications" category (`seed_default_applications()`) against a
+    throwaway test DB (`test_db`, from tests/conftest.py) instead of the removed
+    hardcoded `APP_MAP` dict -- see tests/memory/test_memory_service.py for
+    `MemoryService` CRUD coverage in isolation.
   - close_application resolves an alias to the right process names and calls
     psutil.Process.terminate() on matches (psutil.process_iter is fully mocked -- no
     test in this file ever enumerates or touches a real running process). Also covers
@@ -20,8 +24,10 @@ One test per tool built in this file, plus the `run_routine` end-to-end path:
     launch call is mocked so nothing actually launches VS Code/Chrome in CI. The
     "coding" routine itself is now a persisted row (via `seed_default_routines`,
     `app/routines/registry.py`/`engine.py`, file 04 prompt 2) rather than the hardcoded
-    dict file 03 originally used here -- see tests/routines/ for registry/engine
-    coverage in isolation.
+    dict file 03 originally used here, and its middle step's `app_name` now comes from
+    `MemoryService.get("routines", "coding")["default_project"]` (file 09 prompt 2)
+    rather than a hardcoded "portfolio folder" string -- see tests/routines/ for
+    registry/engine coverage in isolation.
 """
 
 from __future__ import annotations
@@ -29,8 +35,14 @@ from __future__ import annotations
 import sys
 from unittest.mock import Mock, call
 
+from app.memory.service import APPLICATIONS, DEFAULT_CODING_VALUE, MemoryService
 from app.tools import applications as applications_module
-from app.tools.applications import APP_MAP, close_application_tool, open_application_tool
+from app.tools.applications import (
+    DEFAULT_APPLICATION_ALIASES,
+    close_application_tool,
+    open_application_tool,
+    seed_default_applications,
+)
 from app.tools.registry import ToolRegistry
 from app.tools.routines import RunRoutineTool, seed_default_routines
 from app.tools.system import get_time_tool
@@ -62,7 +74,7 @@ def _launched_mock(mock_startfile: Mock, mock_popen: Mock) -> Mock:
 
 
 def _expected_launch_call(app_key: str):
-    command = APP_MAP[app_key]["command"]
+    command = DEFAULT_APPLICATION_ALIASES[app_key]["command"]
     return call(command[0]) if sys.platform == "win32" else call(command)
 
 
@@ -81,8 +93,9 @@ def test_get_time_returns_a_value():
 # --- open_application ---------------------------------------------------------------
 
 
-def test_open_application_resolves_alias_to_right_launch_command(monkeypatch):
+def test_open_application_resolves_alias_via_memory_service(monkeypatch, test_db):
     mock_startfile, mock_popen = _patch_launch(monkeypatch)
+    seed_default_applications()  # persists the "applications" aliases into test_db
 
     result = open_application_tool.handler(app_name="VS Code")  # alias, mixed case
 
@@ -94,9 +107,17 @@ def test_open_application_resolves_alias_to_right_launch_command(monkeypatch):
     unlaunched = mock_popen if launched is mock_startfile else mock_startfile
     unlaunched.assert_not_called()
 
+    # And the entry really did come from the memories table, not an in-code dict.
+    db = test_db()
+    try:
+        assert MemoryService(db).get(APPLICATIONS, "vs code") == DEFAULT_APPLICATION_ALIASES["vs code"]
+    finally:
+        db.close()
 
-def test_open_application_unknown_app_fails_without_touching_the_system(monkeypatch):
+
+def test_open_application_unknown_app_fails_without_touching_the_system(monkeypatch, test_db):
     mock_startfile, mock_popen = _patch_launch(monkeypatch)
+    seed_default_applications()
 
     result = open_application_tool.handler(app_name="not a real app")
 
@@ -125,7 +146,8 @@ def _patch_process_iter(monkeypatch, procs: list[Mock]) -> None:
     )
 
 
-def test_close_application_terminates_matching_process(monkeypatch):
+def test_close_application_terminates_matching_process(monkeypatch, test_db):
+    seed_default_applications()
     chrome = _fake_proc(monkeypatch, 4242, "chrome.exe")
     other = _fake_proc(monkeypatch, 4243, "notepad.exe")
     _patch_process_iter(monkeypatch, [chrome, other])
@@ -138,7 +160,8 @@ def test_close_application_terminates_matching_process(monkeypatch):
     other.terminate.assert_not_called()
 
 
-def test_close_application_no_matching_process_fails(monkeypatch):
+def test_close_application_no_matching_process_fails(monkeypatch, test_db):
+    seed_default_applications()
     other = _fake_proc(monkeypatch, 4243, "notepad.exe")
     _patch_process_iter(monkeypatch, [other])
 
@@ -149,7 +172,8 @@ def test_close_application_no_matching_process_fails(monkeypatch):
     other.terminate.assert_not_called()
 
 
-def test_close_application_unknown_app_fails_without_touching_the_system(monkeypatch):
+def test_close_application_unknown_app_fails_without_touching_the_system(monkeypatch, test_db):
+    seed_default_applications()
     mock_iter = Mock()
     monkeypatch.setattr(applications_module.psutil, "process_iter", mock_iter)
 
@@ -160,12 +184,13 @@ def test_close_application_unknown_app_fails_without_touching_the_system(monkeyp
     mock_iter.assert_not_called()
 
 
-def test_close_application_refuses_to_close_vscode(monkeypatch):
+def test_close_application_refuses_to_close_vscode(monkeypatch, test_db):
     """Regression test for the NEVER_CLOSE guard (see applications.py). Every VS Code
     process shares the image name "Code.exe", so close_application("vscode") must
     refuse before ever calling psutil.process_iter -- looping real processes here would
     terminate the editor/session running this test suite itself.
     """
+    seed_default_applications()
     mock_iter = Mock()
     monkeypatch.setattr(applications_module.psutil, "process_iter", mock_iter)
 
@@ -213,7 +238,10 @@ def test_complete_task_unknown_id_fails(test_db):
 
 def test_run_routine_coding_triggers_three_open_application_calls_in_order(monkeypatch, test_db):
     mock_startfile, mock_popen = _patch_launch(monkeypatch)
-    seed_default_routines()  # persists the "coding" routine into test_db
+    seed_default_applications()  # persists the "applications" aliases into test_db
+    seed_default_routines()  # persists the "coding" routine into test_db, reading
+    # coding.default_project (unset here, so falls back to DEFAULT_CODING_VALUE) off
+    # MemoryService rather than a hardcoded "portfolio folder" string.
 
     registry = ToolRegistry()
     registry.register(open_application_tool)
@@ -226,7 +254,7 @@ def test_run_routine_coding_triggers_three_open_application_calls_in_order(monke
     assert [step["tool_name"] for step in steps] == ["open_application"] * 3
     assert [step["params"]["app_name"] for step in steps] == [
         "vscode",
-        "portfolio folder",
+        DEFAULT_CODING_VALUE["default_project"],
         "chrome",
     ]
     assert all(step["result"]["success"] for step in steps)
@@ -234,8 +262,40 @@ def test_run_routine_coding_triggers_three_open_application_calls_in_order(monke
     launched = _launched_mock(mock_startfile, mock_popen)
     assert launched.call_args_list == [
         _expected_launch_call("vscode"),
-        _expected_launch_call("portfolio folder"),
+        _expected_launch_call(DEFAULT_CODING_VALUE["default_project"]),
         _expected_launch_call("chrome"),
+    ]
+
+
+def test_run_routine_coding_uses_default_project_configured_in_memory(monkeypatch, test_db):
+    """The routine's middle step really does read `coding.default_project` off
+    `MemoryService` at seed time, not just fall back to the same value the hardcoded
+    dict used to have -- seed a *different* default_project first and confirm the
+    seeded routine's step reflects it.
+    """
+    _patch_launch(monkeypatch)
+    seed_default_applications()
+    db = test_db()
+    try:
+        MemoryService(db).set(
+            "routines", "coding", {**DEFAULT_CODING_VALUE, "default_project": "file explorer"}
+        )
+    finally:
+        db.close()
+
+    seed_default_routines()
+
+    registry = ToolRegistry()
+    registry.register(open_application_tool)
+    routine_tool = RunRoutineTool(registry)
+
+    result = routine_tool.handler(routine_name="coding")
+
+    assert result.success is True
+    assert [step["params"]["app_name"] for step in result.data["steps"]] == [
+        "vscode",
+        "file explorer",
+        "chrome",
     ]
 
 
@@ -244,6 +304,7 @@ def test_run_routine_defaults_to_coding(monkeypatch, test_db):
     carries no params) still resolves to the right routine (§11 exact-alias match).
     """
     _patch_launch(monkeypatch)
+    seed_default_applications()
     seed_default_routines()  # persists the "coding" routine into test_db
 
     registry = ToolRegistry()

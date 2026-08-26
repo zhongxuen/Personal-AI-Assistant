@@ -16,7 +16,7 @@ from unittest.mock import Mock, call
 
 from app.routines.registry import RoutineRegistry
 from app.routines.scheduler import RoutineScheduler
-from app.tools.applications import open_application_tool
+from app.tools.applications import open_application_tool, seed_default_applications
 from app.tools.registry import ToolRegistry
 
 
@@ -75,6 +75,7 @@ def test_run_fires_the_routine_through_the_engine(monkeypatch, test_db):
     mock_startfile, mock_popen = Mock(), Mock()
     monkeypatch.setattr("app.tools.applications.os.startfile", mock_startfile, raising=False)
     monkeypatch.setattr("app.tools.applications.subprocess.Popen", mock_popen)
+    seed_default_applications()  # "vscode" alias must resolve via MemoryService now
 
     db = test_db()
     RoutineRegistry(db).create_routine("coding", [("open_application", {"app_name": "vscode"})])

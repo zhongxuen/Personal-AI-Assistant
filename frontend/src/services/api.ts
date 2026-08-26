@@ -2,6 +2,8 @@ import type { HealthResponse } from '../types/health'
 import type { Task, TaskCreateInput, TaskFilters, TaskUpdateInput } from '../types/task'
 import type { Routine, RoutineRunResult, RoutineStep, ToolInfo } from '../types/routine'
 import type { LLMUsageResponse } from '../types/llmUsage'
+import type { ApplicationMapping, DefaultProject } from '../types/memory'
+import type { VoiceMessageResponse } from '../types/voice'
 
 // In dev, Vite proxies /api to the FastAPI backend (see vite.config.ts).
 // In prod this should be set to the deployed API's base URL.
@@ -153,4 +155,103 @@ export async function getLlmUsage(): Promise<LLMUsageResponse> {
     throw new Error(await errorDetail(response, `Failed to load LLM usage: ${response.status}`))
   }
   return response.json() as Promise<LLMUsageResponse>
+}
+
+// --- Memory / settings (§37 Phase 8, file 09 prompt 3) --------------------------------
+
+export async function getApplicationMappings(): Promise<Record<string, ApplicationMapping>> {
+  const response = await fetch(`${API_BASE_URL}/api/memory/applications`)
+  if (!response.ok) {
+    throw new Error(await errorDetail(response, `Failed to load application mappings: ${response.status}`))
+  }
+  return response.json() as Promise<Record<string, ApplicationMapping>>
+}
+
+export async function setApplicationMapping(
+  alias: string,
+  mapping: ApplicationMapping,
+): Promise<ApplicationMapping> {
+  const response = await fetch(`${API_BASE_URL}/api/memory/applications/${encodeURIComponent(alias)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(mapping),
+  })
+  if (!response.ok) {
+    throw new Error(await errorDetail(response, `Failed to save '${alias}': ${response.status}`))
+  }
+  return response.json() as Promise<ApplicationMapping>
+}
+
+export async function deleteApplicationMapping(alias: string): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/memory/applications/${encodeURIComponent(alias)}`, {
+    method: 'DELETE',
+  })
+  if (!response.ok) {
+    throw new Error(await errorDetail(response, `Failed to delete '${alias}': ${response.status}`))
+  }
+}
+
+// --- Voice (§24, §25, file 10 prompt 2) ------------------------------------------------
+//
+// Both calls below hit the same POST /api/voice/message endpoint (backend/app/api/
+// routes/voice.py) -- `transcribeVoiceAudio` previews a recording with `dry_run: true`
+// (STT only, nothing executes yet) so the caller can show/let the user edit the
+// transcript before anything runs; `sendVoiceText` submits that (possibly edited)
+// transcript for real, the same way a second call to the same endpoint does server-side.
+
+async function postVoiceMessage(form: FormData): Promise<VoiceMessageResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/voice/message`, {
+    method: 'POST',
+    body: form,
+  })
+  if (!response.ok) {
+    throw new Error(await errorDetail(response, `Voice request failed: ${response.status}`))
+  }
+  return response.json() as Promise<VoiceMessageResponse>
+}
+
+export async function transcribeVoiceAudio(audio: Blob): Promise<VoiceMessageResponse> {
+  const form = new FormData()
+  form.set('audio', audio, 'recording.webm')
+  form.set('dry_run', 'true')
+  return postVoiceMessage(form)
+}
+
+export interface SendVoiceTextOptions {
+  confirmed?: boolean
+  override?: boolean
+  conversationId?: string
+}
+
+export async function sendVoiceText(
+  text: string,
+  options: SendVoiceTextOptions = {},
+): Promise<VoiceMessageResponse> {
+  const form = new FormData()
+  form.set('text', text)
+  form.set('dry_run', 'false')
+  form.set('confirmed', String(options.confirmed ?? false))
+  form.set('override', String(options.override ?? false))
+  if (options.conversationId) form.set('conversation_id', options.conversationId)
+  return postVoiceMessage(form)
+}
+
+export async function getDefaultProject(): Promise<DefaultProject> {
+  const response = await fetch(`${API_BASE_URL}/api/memory/default-project`)
+  if (!response.ok) {
+    throw new Error(await errorDetail(response, `Failed to load default project: ${response.status}`))
+  }
+  return response.json() as Promise<DefaultProject>
+}
+
+export async function setDefaultProject(defaultProject: string): Promise<DefaultProject> {
+  const response = await fetch(`${API_BASE_URL}/api/memory/default-project`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ default_project: defaultProject }),
+  })
+  if (!response.ok) {
+    throw new Error(await errorDetail(response, `Failed to save default project: ${response.status}`))
+  }
+  return response.json() as Promise<DefaultProject>
 }

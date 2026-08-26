@@ -13,8 +13,11 @@ file 08 promised, not just that the underlying helpers (`select_relevant_tools`,
   2. conversation history -- only turns belonging to *this* conversation_id, bounded to
      `context_manager.MAX_RECENT_TURNS`, never another conversation's turns and never
      the entire history once it exceeds that bound.
-  3. memory -- no `memory` key sent at all, since no `MemoryService` exists yet (file
-     09) -- `app.core.context_manager._relevant_memory` is a guarded no-op until then.
+  3. memory -- no `memory` key sent for `TASK_RELATED_UNRESOLVABLE_MESSAGE`, since a
+     bare task question references no priority/preference (see
+     `app.memory.retrieval`'s module docstring for why `task` alone doesn't pull
+     `user_preferences`) -- selective retrieval itself is covered by
+     `tests/memory/test_selective_retrieval.py`, not this file.
 """
 
 from __future__ import annotations
@@ -186,7 +189,7 @@ def test_no_recent_turns_key_when_conversation_has_no_history(db_session):
     assert "recent_turns" not in llm_request.context
 
 
-def test_no_memory_key_sent_when_no_memory_service_exists(db_session):
+def test_no_memory_key_sent_when_message_matches_no_memory_category(db_session):
     conversation = _seed_conversation(db_session, message_count=0)
 
     route_mock = _handle(db_session, str(conversation.id))

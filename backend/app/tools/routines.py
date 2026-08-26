@@ -1,14 +1,22 @@
 """
-Routine tool (§37 Phase 2 / file 03, replaced file 04 prompt 2).
+Routine tool (§37 Phase 2 / file 03, replaced file 04 prompt 2, promoted file 09 prompt 2).
 
 `run_routine` now runs any named routine persisted via `RoutineRegistry`/
 `RoutineEngine` (`app/routines/`), instead of file 03's hardcoded `ROUTINES` dict.
 `seed_default_routines()` creates the "coding" routine -- open VS Code -> open the
-portfolio folder -> open Chrome, the exact three steps file 03 hardcoded -- as a real
-persisted row the first time the app starts (`register_default_tools`, called once from
-`main.py`'s lifespan, calls this after registering `RunRoutineTool`). It's idempotent:
-every call after the first is a no-op, since it only seeds a name that's missing --
-never resurrecting a routine a user has since edited or deleted.
+configured default project -> open Chrome -- as a real persisted row the first time
+the app starts (`register_default_tools`, called once from `main.py`'s lifespan, calls
+this after registering `RunRoutineTool`). It's idempotent: every call after the first
+is a no-op, since it only seeds a name that's missing -- never resurrecting a routine a
+user has since edited or deleted.
+
+The middle step's `app_name` is no longer a hardcoded "portfolio folder" string: it's
+read from `MemoryService.get("routines", "coding")["default_project"]` at seed time --
+development-plan.md §15's exact example of "Start coding" resolving to the correct
+environment via memory. Whatever a user sets `coding.default_project` to (via
+`MemoryService.set()` or the settings UI) is what gets seeded into the routine, as long
+as seeding happens after `seed_default_memory()` has run (see `app/tools/__init__.py`'s
+call order).
 
 `RunRoutineTool` is now a thin dispatcher onto `RoutineEngine.run()`, which is where the
 actual step-by-step `ToolExecutor` dispatch (§41 Rule 6) lives.
@@ -20,20 +28,29 @@ from typing import Any
 
 from app.core.permissions import PermissionLevel
 from app.database.database import SessionLocal
+from app.memory.service import DEFAULT_CODING_CATEGORY, DEFAULT_CODING_KEY, DEFAULT_CODING_VALUE, MemoryService
 from app.routines.registry import RoutineRegistry
 from app.tools.base import ToolResult
 from app.tools.registry import ToolRegistry
 
 DEFAULT_ROUTINE_NAME = "coding"
 
-# Seeded once at first startup via seed_default_routines() -- see module docstring.
-# Kept here (not in app/routines/) since this is the one concrete routine this project
-# ships with; app/routines/ itself stays generic (registry + engine, no fixed content).
-DEFAULT_ROUTINE_STEPS: list[tuple[str, dict[str, Any]]] = [
-    ("open_application", {"app_name": "vscode"}),
-    ("open_application", {"app_name": "portfolio folder"}),
-    ("open_application", {"app_name": "chrome"}),
-]
+
+def _default_routine_steps(db: Any) -> list[tuple[str, dict[str, Any]]]:
+    """Open VS Code -> open the memory-configured default project -> open Chrome.
+
+    Reads `coding.default_project` off the same session `seed_default_routines()` is
+    already using, so this reflects whatever value is currently persisted (falling
+    back to `DEFAULT_CODING_VALUE` if the "coding" memory entry hasn't been seeded/set
+    yet) -- never a hardcoded folder alias.
+    """
+    coding = MemoryService(db).get(DEFAULT_CODING_CATEGORY, DEFAULT_CODING_KEY, DEFAULT_CODING_VALUE)
+    default_project = coding.get("default_project", DEFAULT_CODING_VALUE["default_project"])
+    return [
+        ("open_application", {"app_name": "vscode"}),
+        ("open_application", {"app_name": default_project}),
+        ("open_application", {"app_name": "chrome"}),
+    ]
 
 
 def seed_default_routines() -> None:
@@ -47,7 +64,7 @@ def seed_default_routines() -> None:
     try:
         registry = RoutineRegistry(db)
         if registry.get_routine(DEFAULT_ROUTINE_NAME) is None:
-            registry.create_routine(DEFAULT_ROUTINE_NAME, DEFAULT_ROUTINE_STEPS)
+            registry.create_routine(DEFAULT_ROUTINE_NAME, _default_routine_steps(db))
     finally:
         db.close()
 

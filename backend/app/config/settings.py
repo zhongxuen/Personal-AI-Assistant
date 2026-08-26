@@ -94,6 +94,23 @@ class Settings(BaseSettings):
     # to DISABLED (i.e. stops being retried even after a config fix, until reset()).
     llm_permanent_error_threshold: int = 3
 
+    # Speech-to-text (§24, §25, file 10). Local-only by default -- faster-whisper runs
+    # entirely on-device, no API key (development plan §25: "Prefer local/free speech
+    # processing where practical to maintain the zero-cost objective"). Model size
+    # trades accuracy for load time/memory ("tiny" .. "large-v3"); compute_type
+    # "int8" keeps CPU-only inference fast without a GPU.
+    stt_whisper_model_size: str = "base"
+    stt_whisper_device: str = "cpu"
+    stt_whisper_compute_type: str = "int8"
+
+    # Text-to-speech (§24, §25, file 10). pyttsx3 drives each OS's native offline
+    # voice (SAPI5/NSSpeechSynthesizer/espeak) -- no API key, no per-request cost.
+    # tts_voice_id left unset uses the OS default voice; set to one of the voice ids
+    # `pyttsx3.init().getProperty("voices")` reports to pick a specific one.
+    tts_rate_wpm: int = 175
+    tts_volume: float = 1.0
+    tts_voice_id: str | None = None
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
