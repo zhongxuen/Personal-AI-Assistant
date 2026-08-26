@@ -1,14 +1,14 @@
 """
-Command router tests (§2, §11, extended file 04 prompt 1).
+Command router tests (§2, §11, extended file 04 prompt 1, file 08 prompt 1).
 
 Registers a few fake tools (no real system side effects) and asserts that:
-  - exact-name/alias matches resolve deterministically
+  - exact-name/alias matches resolve deterministically (classification DETERMINISTIC)
   - "<verb> <remainder>" phrasings ("open vscode", "launch vscode", "start
-    vscode") all resolve to the same tool + params
-  - an unrelated phrase falls through to NEEDS_LLM
+    vscode") all resolve to the same tool + params (classification DETERMINISTIC)
+  - an unrelated phrase falls through to classification LLM_REQUIRED
   - the "remind me to X [time phrase]" alias splits the trailing/embedded date phrase
     out of the title via `split_title_and_due` instead of file 03's naive
-    whole-remainder-as-title capture
+    whole-remainder-as-title capture (classification LOCAL_PARSE)
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from app.core.command_router import NEEDS_LLM, CommandRouter, RouteResult
+from app.core.command_router import CommandClassification, CommandRouter, RouteResult
 from app.core.permissions import PermissionLevel
 from app.tools.base import ToolResult
 from app.tools.registry import ToolRegistry
@@ -82,6 +82,7 @@ def test_open_launch_start_all_resolve_to_same_tool_and_params():
         result = router.route(phrase)
         assert result.tool_name == open_app.name
         assert result.params == {"target": "vscode"}
+        assert result.classification == CommandClassification.DETERMINISTIC
 
 
 def test_exact_name_match_resolves_with_no_params():
@@ -89,7 +90,9 @@ def test_exact_name_match_resolves_with_no_params():
     router = CommandRouter(registry)
 
     result = router.route("ping")
-    assert result == RouteResult(tool_name=ping.name, params={})
+    assert result == RouteResult(
+        tool_name=ping.name, params={}, classification=CommandClassification.DETERMINISTIC
+    )
 
 
 def test_alias_verb_prefix_uses_a_different_tool():
@@ -99,22 +102,24 @@ def test_alias_verb_prefix_uses_a_different_tool():
     result = router.route("close vscode")
     assert result.tool_name == close_app.name
     assert result.params == {"target": "vscode"}
+    assert result.classification == CommandClassification.DETERMINISTIC
 
 
-def test_unrelated_phrase_returns_needs_llm():
+def test_unrelated_phrase_returns_llm_required():
     registry, *_ = _registry()
     router = CommandRouter(registry)
 
     result = router.route("what's the weather like tomorrow?")
-    assert result is NEEDS_LLM
+    assert result.classification == CommandClassification.LLM_REQUIRED
+    assert result.tool_name is None
 
 
-def test_empty_message_returns_needs_llm():
+def test_empty_message_returns_llm_required():
     registry, *_ = _registry()
     router = CommandRouter(registry)
 
-    assert router.route("") is NEEDS_LLM
-    assert router.route("   ") is NEEDS_LLM
+    assert router.route("").classification == CommandClassification.LLM_REQUIRED
+    assert router.route("   ").classification == CommandClassification.LLM_REQUIRED
 
 
 # --- "remind me to X [time phrase]" -> create_task special-case -----------------------
@@ -143,6 +148,7 @@ def test_remind_me_to_splits_trailing_time_phrase_into_due_param():
     assert result.params["title"] == "submit my assignment"
     # Just needs to be a real, parseable ISO datetime -- exact value depends on "now".
     assert datetime.fromisoformat(result.params["due"]).hour == 20
+    assert result.classification == CommandClassification.LOCAL_PARSE
 
 
 def test_remind_me_to_without_time_phrase_has_no_due_param():
@@ -152,3 +158,4 @@ def test_remind_me_to_without_time_phrase_has_no_due_param():
 
     assert result.tool_name == "create_task"
     assert result.params == {"title": "buy milk"}
+    assert result.classification == CommandClassification.LOCAL_PARSE

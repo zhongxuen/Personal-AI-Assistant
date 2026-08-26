@@ -7,14 +7,19 @@ Tool executor (§18-19, §41 Rule 6).
     2. validate params against the tool's JSON schema
     3. check PermissionChecker
     4. check the requesting platform is one the tool supports (§22)
-    5. call tool.handler(**params)
+    5. call tool.handler(**params) -- or reuse a cached result for a `cacheable`
+       tool (file 08 prompt 4, see `app.core.cache`), which skips this call entirely
     6. write a row to tool_execution_logs
     7. return the ToolResult
 
 No other code path is allowed to call `tool.handler(...)` directly, and none of the
 above steps may be skipped -- even an early failure (unknown tool, bad params, denied
 permission, unsupported platform) still gets logged before returning, so every attempt
-leaves an audit trail.
+leaves an audit trail. Step 5's cache short-circuit is the one deliberate exception to
+"the handler runs every time": it only ever applies to a tool that opted in with
+`cacheable = True` (see `app.core.cache.ResponseCache`'s docstring for exactly what
+qualifies), and even then only after every check above it already passed -- caching
+never bypasses validation, permission, or platform checks, only the handler call.
 """
 
 from __future__ import annotations
@@ -25,6 +30,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.cache import ResponseCache, response_cache
 from app.core.permissions import PermissionChecker, RequesterContext
 from app.database.models import ToolExecutionLog
 from app.tools.base import ToolResult
@@ -99,12 +105,16 @@ class ToolExecutor:
         registry: ToolRegistry,
         permission_checker: PermissionChecker | None = None,
         db: Session | None = None,
+        cache: ResponseCache | None = None,
     ) -> None:
         self.registry = registry
         self.db = db
         # Share the same db session so permission decisions and execution logs land
         # in the same transaction/connection, unless the caller wired up its own checker.
         self.permission_checker = permission_checker or PermissionChecker(db=db)
+        # Process-wide by default (same instance CommandRouter peeks at) -- a caller
+        # can still inject its own for test isolation.
+        self.cache = cache if cache is not None else response_cache
 
     def execute(
         self, tool_name: str, params: dict[str, Any] | None, context: RequesterContext
@@ -142,12 +152,25 @@ class ToolExecutor:
                 ToolResult(success=False, error=f"This action isn't available on {context.platform}."),
             )
 
-        # 5. Execute the tool's handler.
-        try:
-            result = tool.handler(**params)
-        except Exception as exc:  # a misbehaving handler must not crash the executor
-            logger.exception("Tool '%s' raised during execution.", tool.name)
-            result = ToolResult(success=False, error=f"Tool '{tool.name}' raised an error: {exc}")
+        # 5. Execute the tool's handler -- unless it's `cacheable` and a fresh cached
+        #    result already exists, in which case reuse that and skip the handler
+        #    entirely (file 08 prompt 4: zero re-execution on a cache hit).
+        cacheable = bool(getattr(tool, "cacheable", False))
+        cached_result = self.cache.get(tool.name, params) if cacheable else None
+
+        if cached_result is not None:
+            result = cached_result
+        else:
+            try:
+                result = tool.handler(**params)
+            except Exception as exc:  # a misbehaving handler must not crash the executor
+                logger.exception("Tool '%s' raised during execution.", tool.name)
+                result = ToolResult(success=False, error=f"Tool '{tool.name}' raised an error: {exc}")
+
+            if cacheable and result.success:
+                # Only cache a successful result -- a failure should be retried on
+                # the very next call, not replayed from cache until it expires.
+                self.cache.set(tool.name, params, result)
 
         # 6 & 7. Log the attempt and return its result.
         return self._finish(tool.name, params, context, result)

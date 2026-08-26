@@ -3,9 +3,8 @@ Application configuration.
 
 Settings are loaded from environment variables / a `.env` file at the
 repository root, so the app behaves the same whether uvicorn is launched
-from `backend/` or from the repo root. Provider-specific config (Gemini)
-arrived in file 05; Ollama's is still a placeholder pending file 07 — see
-md-files/development-plan.md.
+from `backend/` or from the repo root. Provider-specific config: Gemini
+arrived in file 05, Ollama in file 07 — see md-files/development-plan.md.
 """
 
 from functools import lru_cache
@@ -45,8 +44,30 @@ class Settings(BaseSettings):
     gemini_max_retries: int = 2
     gemini_retry_base_delay_seconds: float = 1.0
 
-    # Ollama fallback -- still just a placeholder until file 07.
+    # Ollama fallback (file 07). `ollama_model` must be a model actually pulled on the
+    # local server -- OllamaProvider.is_available() checks this against the server's
+    # own model list rather than assuming, same spirit as Gemini's key check but via a
+    # (short-timeout) network probe, since a local service can't be assumed installed
+    # or running the way "an env var is set" can (§3 of the development plan).
+    # `ollama_enabled` is the operator-facing on/off switch `ProviderManager` reads to
+    # decide whether OllamaProvider's chain entry is included at all -- separate from
+    # `is_available()`, which still governs whether an *enabled* entry gets called on
+    # any given request.
+    ollama_enabled: bool = True
     ollama_base_url: str = "http://localhost:11434"
+    ollama_model: str = "llama3.2"
+    # Timeout for the actual chat/generate call -- deliberately separate from
+    # ollama_availability_timeout_seconds below, since generation legitimately takes
+    # much longer than a health-check GET.
+    ollama_timeout_seconds: float = 30.0
+    # Short timeout for is_available()'s GET to /api/tags -- this runs before every
+    # generate() call (and may run from AIRouter probing multiple providers), so it
+    # must fail fast rather than hang waiting on a service that isn't there.
+    ollama_availability_timeout_seconds: float = 2.0
+    # Same *retry count* convention as gemini_max_retries -- applies only to
+    # RETRYABLE_ERROR, and ollama_max_retries=2 means up to 3 total attempts.
+    ollama_max_retries: int = 2
+    ollama_retry_base_delay_seconds: float = 1.0
 
     # Gemini usage budget (§8, file 06+). These are *internal* budgets the app
     # enforces on itself, deliberately set BELOW Google's actual quota -- they are

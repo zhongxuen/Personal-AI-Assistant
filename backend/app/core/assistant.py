@@ -7,11 +7,12 @@ ToolExecutor runs any resolved tool call through the full validate/permission/pl
 log pipeline, and the result is wrapped back into an AssistantResponse. Never duplicate
 this orchestration logic per platform (§41 Rule 7); adapters only translate in and out.
 
-When CommandRouter can't resolve a message deterministically (NEEDS_LLM), it's handed to
-AIRouter (file 06), which walks the configured provider chain (just GeminiProvider for
-now) and fails over on any non-SUCCESS result. Any tool calls the LLM asks for still go
-through the *same* ToolExecutor as the deterministic path (§41 Rule 6) -- the LLM never
-gets a shortcut around validation/permission/platform checks.
+When CommandRouter can't resolve a message deterministically (classification
+LLM_REQUIRED), it's handed to AIRouter (file 06), which walks the configured provider
+chain (just GeminiProvider for now) and fails over on any non-SUCCESS result. Any tool
+calls the LLM asks for still go through the *same* ToolExecutor as the deterministic
+path (§41 Rule 6) -- the LLM never gets a shortcut around validation/permission/platform
+checks.
 """
 
 from __future__ import annotations
@@ -20,14 +21,17 @@ import asyncio
 
 from sqlalchemy.orm import Session
 
-from app.core.command_router import NEEDS_LLM, CommandRouter
+from app.core.command_router import CommandClassification, CommandRouter
+from app.core.context_manager import build_context
 from app.core.models import AssistantRequest, AssistantResponse
 from app.core.permissions import RequesterContext
 from app.core.tool_executor import ToolExecutor
 from app.llm.ai_router import NO_PROVIDER_AVAILABLE_ERROR_TYPE, AIRouter
 from app.llm.base import LLMRequest, LLMResult
+from app.llm.health import HealthManager
 from app.tools.base import Tool, ToolResult
 from app.tools.registry import ToolRegistry
+from app.tools.relevance import select_relevant_tools
 
 # Honest, non-crashing explanations for each non-SUCCESS LLMResult.status (§41 Rule 3).
 # None of these are retried further here -- each provider already retried its own
@@ -73,11 +77,22 @@ class AssistantCore:
     to AIRouter for a reasoned answer (which may itself request tool calls).
     """
 
-    def __init__(self, registry: ToolRegistry, db: Session | None = None) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        db: Session | None = None,
+        health_manager: HealthManager | None = None,
+    ) -> None:
         self.registry = registry
+        self.db = db
         self.router = CommandRouter(registry)
         self.executor = ToolExecutor(registry, db=db)
-        self.ai_router = AIRouter(db=db)
+        # `health_manager` defaults to a fresh, per-instance HealthManager (the
+        # original behavior) when the caller doesn't supply one -- but every real
+        # request should pass the process-wide instance from
+        # `app.api.dependencies.get_health_manager` so provider health actually
+        # persists across requests instead of resetting every time.
+        self.ai_router = AIRouter(db=db, health_manager=health_manager)
 
     def handle(self, request: AssistantRequest) -> AssistantResponse:
         context = RequesterContext(
@@ -89,8 +104,12 @@ class AssistantCore:
 
         route_result = self.router.route(request.message)
 
-        if route_result is NEEDS_LLM:
+        if route_result.classification == CommandClassification.LLM_REQUIRED:
             return self._handle_needs_llm(request, context)
+
+        # DETERMINISTIC, LOCAL_PARSE, and (once file 08 prompt 4 lands) CACHED all
+        # already resolved to a concrete tool call -- run it through the same
+        # executor/permission pipeline regardless of which of those produced it.
 
         result = self.executor.execute(route_result.tool_name, route_result.params, context)
 
@@ -111,12 +130,19 @@ class AssistantCore:
     def _handle_needs_llm(
         self, request: AssistantRequest, context: RequesterContext
     ) -> AssistantResponse:
-        # NOTE: passing the *entire* registered tool set to Gemini is temporary (§4/
-        # file 05 scope) -- file 08 narrows this to a selective subset per request.
+        # file 08: narrow the full platform-eligible tool set down to whatever's
+        # plausibly relevant to this message (see app/tools/relevance.py) instead of
+        # handing Gemini everything, as file 05 did.
+        platform_tools = self.registry.list(platform=request.platform)
+        relevant_tools = select_relevant_tools(request.message, platform_tools)
         llm_request = LLMRequest(
             message=request.message,
-            context={"user_id": request.user_id, "platform": request.platform},
-            tools=[_tool_to_schema(tool) for tool in self.registry.list(platform=request.platform)],
+            # file 08 prompt 3: current message + bounded recent conversation turns +
+            # relevant memory (guarded no-op until file 09 exists) -- see
+            # app.core.context_manager, replacing the {"user_id", "platform"}-only
+            # context file 05 built here directly.
+            context=build_context(request, self.db),
+            tools=[_tool_to_schema(tool) for tool in relevant_tools],
             conversation_id=request.conversation_id,
         )
         result = asyncio.run(self.ai_router.route(llm_request))
@@ -135,6 +161,21 @@ class AssistantCore:
     def _handle_llm_success(
         self, result: LLMResult, context: RequesterContext
     ) -> AssistantResponse:
+        # file 08 prompt 3 (call consolidation review): GeminiProvider/OllamaProvider
+        # already fold every tool call from a single model response into one
+        # `LLMResult.tool_calls` list (see their `_to_result`) -- no re-invocation of
+        # the LLM happens per tool call, so there's no round trip to remove there.
+        #
+        # The round trip that *does* remain, for future revisit: once every tool call
+        # below is executed, its `ToolResult` is turned into user-facing text locally
+        # (`_success_text`/the error string) and never sent back to the provider for a
+        # second, tool-result-aware generation call. A full agentic loop would instead
+        # feed `tool_calls` + their results back to the model so it can compose one
+        # final natural-language reply grounded in what actually happened. Skipping
+        # that second call is deliberate for now (one LLM call per turn keeps quota
+        # usage predictable, per §9/file 08's whole goal) but means `result.text` (if
+        # the model returned any alongside its tool calls) and the mechanically-joined
+        # tool result text below are never reconciled by the model itself.
         tool_calls: list[dict] = []
         result_texts: list[str] = []
 

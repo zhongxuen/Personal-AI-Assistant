@@ -30,5 +30,12 @@ class Tool(Protocol):
     permission: PermissionLevel
     platforms: list[str]  # §22 capability declaration, e.g. ["desktop", "web", "discord"]
     requires_confirmation: bool
+    # Optional (file 08 prompt 4, see `app.core.cache.ResponseCache`'s docstring for
+    # exactly what qualifies) -- most tools don't declare this at all, and
+    # ToolExecutor/CommandRouter read it via `getattr(tool, "cacheable", False)`, so
+    # omitting it is equivalent to `cacheable = False`. Only set `cacheable = True` on
+    # a tool whose result is safe/side-effect-free AND deterministic/static enough to
+    # replay for a short TTL -- never on anything that mutates state or reads
+    # user-specific-and-mutable data.
 
     def handler(self, **kwargs: Any) -> ToolResult: ...

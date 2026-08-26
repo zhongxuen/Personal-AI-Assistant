@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.dependencies import get_tool_registry
 from app.api.routes.assistant import router as assistant_router
 from app.api.routes.health import router as health_router
+from app.api.routes.llm_usage import router as llm_usage_router
 from app.api.routes.routines import router as routines_router
 from app.api.routes.tasks import router as tasks_router
 from app.config.logging import configure_logging
@@ -77,6 +78,7 @@ app.include_router(health_router, prefix="/api")
 app.include_router(assistant_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
 app.include_router(routines_router, prefix="/api")
+app.include_router(llm_usage_router, prefix="/api")
 
 
 if __name__ == "__main__":

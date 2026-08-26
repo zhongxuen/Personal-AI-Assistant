@@ -1,15 +1,17 @@
 """
-ProviderManager tests (§37 Phase 5, file 06).
+ProviderManager tests (§37 Phase 5, files 06-07).
 
 Exercises the chain-assembly logic in isolation from `AIRouter`: the default chain is
-just `GeminiProvider` at priority 1, `get_chain()` orders by ascending priority, and
-disabled entries never appear in the chain it hands back.
+`GeminiProvider` at priority 1 then `OllamaProvider` at priority 2, `get_chain()`
+orders by ascending priority, and disabled entries -- including Ollama when
+`ollama_enabled=False` -- never appear in the chain it hands back.
 """
 
 from __future__ import annotations
 
 from app.config.settings import Settings
 from app.llm.gemini import GeminiProvider
+from app.llm.ollama import OllamaProvider
 from app.llm.provider_manager import ProviderEntry, ProviderManager
 
 
@@ -28,8 +30,18 @@ def _settings(**overrides) -> Settings:
     return Settings(_env_file=None, gemini_api_key="test-api-key", **overrides)
 
 
-def test_default_chain_is_gemini_only_at_priority_one():
+def test_default_chain_is_gemini_then_ollama():
     manager = ProviderManager(settings=_settings())
+
+    chain = manager.get_chain()
+
+    assert len(chain) == 2
+    assert isinstance(chain[0], GeminiProvider)
+    assert isinstance(chain[1], OllamaProvider)
+
+
+def test_default_chain_excludes_ollama_when_disabled_via_settings():
+    manager = ProviderManager(settings=_settings(ollama_enabled=False))
 
     chain = manager.get_chain()
 

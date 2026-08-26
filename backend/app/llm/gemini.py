@@ -122,6 +122,13 @@ class GeminiProvider:
         return "PERMANENT_ERROR", status or f"http_{code}"
 
     def _to_result(self, response: genai_types.GenerateContentResponse, start: float) -> LLMResult:
+        # `response.function_calls` already collects every function call the SDK
+        # parsed out of this one response (§12 call consolidation) -- when the model
+        # asks for several tool calls in a single turn, they all land in this one list
+        # and `AssistantCore._handle_llm_success` executes all of them without ever
+        # calling back into Gemini per call. See that method's docstring for the
+        # round trip that *does* still remain (tool results aren't sent back for a
+        # second, synthesis generation call) -- not something the SDK gates here.
         tool_calls = [
             ToolCallRequest(tool_name=call.name, params=dict(call.args or {}))
             for call in (response.function_calls or [])

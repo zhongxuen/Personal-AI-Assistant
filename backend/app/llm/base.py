@@ -71,10 +71,15 @@ class LLMResult(BaseModel):
 
 @runtime_checkable
 class LLMProvider(Protocol):
-    """Contract every LLM provider satisfies. `is_available()` must be a cheap local
-    check (e.g. "is an API key configured") -- never a network call -- so `AIRouter`
-    (file 06) can probe providers without incurring latency or quota cost (§41 Rule 3:
-    never assume the LLM is available)."""
+    """Contract every LLM provider satisfies. For a cloud provider like `GeminiProvider`,
+    `is_available()` should be a cheap local check (e.g. "is an API key configured") --
+    never a network call -- so `AIRouter` (file 06) can probe it without incurring
+    latency or quota cost. A provider fronting a local service the app cannot assume
+    is installed or running (`OllamaProvider`, file 07) is the deliberate exception:
+    it performs a short, bounded network probe instead, since "is this configured" and
+    "is this actually running right now" are different questions for a local service.
+    Either way, `is_available()` must never raise and never assume availability (§41
+    Rule 3) -- a connection error, timeout, or missing config all just mean False."""
 
     name: str
 

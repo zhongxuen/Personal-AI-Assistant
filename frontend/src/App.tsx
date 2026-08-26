@@ -2,12 +2,14 @@ import { useState } from 'react'
 import { StatusPage } from './pages/StatusPage'
 import { TasksPage } from './pages/Tasks'
 import { RoutinesPage } from './pages/Routines'
+import { ProviderStatusPage } from './pages/ProviderStatus'
 
-type View = 'status' | 'tasks' | 'routines'
+type View = 'status' | 'tasks' | 'routines' | 'providers'
 
 const TABS: { id: View; label: string }[] = [
   { id: 'tasks', label: 'Tasks' },
   { id: 'routines', label: 'Routines' },
+  { id: 'providers', label: 'AI Providers' },
   { id: 'status', label: 'Status' },
 ]
 
@@ -31,6 +33,7 @@ function App() {
       </nav>
       {view === 'tasks' && <TasksPage />}
       {view === 'routines' && <RoutinesPage />}
+      {view === 'providers' && <ProviderStatusPage />}
       {view === 'status' && <StatusPage />}
     </div>
   )

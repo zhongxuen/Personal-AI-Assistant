@@ -145,11 +145,11 @@ async def test_result_is_recorded_with_health_manager_for_every_attempted_provid
     assert health.get_status("second").state == ProviderHealthState.AVAILABLE
 
 
-# Today's real chain (`ProviderManager`'s default) is Gemini alone -- these three
-# cover that exact shape: no second provider exists yet for the router to fail over
-# to, so a skip or a failure must still come back as a graceful, non-crashing result
-# rather than raising or hanging (§41 Rule 3).
-class TestOnlyGeminiRegistered:
+# A single-entry chain (constructed here via a fake, independent of ProviderManager's
+# real default) -- these three cover that shape: no second provider exists for the
+# router to fail over to, so a skip or a failure must still come back as a graceful,
+# non-crashing result rather than raising or hanging (§41 Rule 3).
+class TestSingleProviderChain:
     @pytest.mark.asyncio
     async def test_successful_call_returns_immediately_with_fallback_used_false(self):
         gemini = FakeProvider("gemini", [LLMResult(status="SUCCESS", text="hi")])

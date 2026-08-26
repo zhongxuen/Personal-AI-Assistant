@@ -27,6 +27,10 @@ class GetTimeTool:
     permission = PermissionLevel.SAFE
     platforms = ["desktop"]
     requires_confirmation = False
+    # Deliberately NOT cacheable (see app.core.cache.ResponseCache's docstring): safe
+    # and side-effect-free, but its whole point is to be exact to the current second,
+    # so replaying a cached answer would serve a wrong time by design.
+    cacheable = False
 
     def handler(self, **kwargs: Any) -> ToolResult:
         now = datetime.now()
@@ -48,6 +52,10 @@ class GetSystemInfoTool:
     permission = PermissionLevel.SAFE
     platforms = ["desktop"]
     requires_confirmation = False
+    # Cacheable (see app.core.cache.ResponseCache's docstring): safe, side-effect-free,
+    # and a snapshot that's fine to serve a few seconds stale -- unlike get_time, no
+    # one needs cpu_percent/memory_percent accurate to the millisecond.
+    cacheable = True
 
     def handler(self, **kwargs: Any) -> ToolResult:
         try:

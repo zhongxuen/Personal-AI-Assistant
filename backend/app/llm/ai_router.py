@@ -9,9 +9,10 @@ provider on any other status. This is the single choke point where quota (§8,
 ever called, and where every attempt's outcome is fed back into `HealthManager` and
 logged to `llm_usage` (via each provider's own `generate()`, see `app.llm.gemini`).
 
-Only `GeminiProvider` is registered today, so failover never actually triggers yet --
-but the chain-walking/skip/fallback-logging logic here must already be correct for
-when file 07 adds `OllamaProvider` as a second chain entry.
+`ProviderManager` registers `GeminiProvider` (priority 1) and `OllamaProvider`
+(priority 2, file 07) -- this module has no provider-specific branches for either;
+adding a third provider requires no changes here, only another `ProviderEntry` in
+`ProviderManager`.
 """
 
 from __future__ import annotations

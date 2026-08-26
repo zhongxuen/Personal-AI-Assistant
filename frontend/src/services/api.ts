@@ -1,6 +1,7 @@
 import type { HealthResponse } from '../types/health'
 import type { Task, TaskCreateInput, TaskFilters, TaskUpdateInput } from '../types/task'
 import type { Routine, RoutineRunResult, RoutineStep, ToolInfo } from '../types/routine'
+import type { LLMUsageResponse } from '../types/llmUsage'
 
 // In dev, Vite proxies /api to the FastAPI backend (see vite.config.ts).
 // In prod this should be set to the deployed API's base URL.
@@ -142,4 +143,14 @@ export async function runRoutine(name: string): Promise<RoutineRunResult> {
     throw new Error(await errorDetail(response, `Failed to run routine: ${response.status}`))
   }
   return response.json() as Promise<RoutineRunResult>
+}
+
+// --- LLM provider status (§8, §39) ----------------------------------------------------
+
+export async function getLlmUsage(): Promise<LLMUsageResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/llm/usage`)
+  if (!response.ok) {
+    throw new Error(await errorDetail(response, `Failed to load LLM usage: ${response.status}`))
+  }
+  return response.json() as Promise<LLMUsageResponse>
 }

@@ -6,11 +6,11 @@ through `AssistantCore.handle()` -- the same entrypoint every platform adapter c
 against the real, fully-registered tool set (`register_default_tools`), and asserts:
 
   1. `AssistantResponse.used_llm` is `False` for every one of them (CommandRouter
-     resolved them deterministically; NEEDS_LLM was never hit), and
+     resolved them deterministically; classification LLM_REQUIRED was never hit), and
   2. no network call was ever attempted -- `httpx`/`requests` are monkeypatched to raise
      if called at all (including `httpx.AsyncClient.send`, the path Gemini's async SDK
      actually uses -- see file 05), so any accidental LLM/network call would be caught.
-     NEEDS_LLM now does call GeminiProvider for real (file 05); these tests only cover
+     A message classified LLM_REQUIRED now does call GeminiProvider for real (file 05); these tests only cover
      commands that resolve deterministically, so GeminiProvider.generate is never
      reached and this block never fires for them.
 
@@ -167,7 +167,7 @@ def test_run_routine_is_zero_llm(no_network, core):
 
 def test_unrecognized_message_needs_llm_but_still_makes_no_network_call(no_network, core):
     # The one message in this file that *doesn't* resolve deterministically -- proves
-    # NEEDS_LLM falls through to the placeholder response rather than an actual call,
+    # classification LLM_REQUIRED falls through to the placeholder response rather than an actual call,
     # since no AI Router exists yet (file 06).
     response = _handle(core, "what's the weather like tomorrow?")
 

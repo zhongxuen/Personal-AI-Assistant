@@ -32,10 +32,14 @@ from app.database.models import LLMUsage
 QuotaStatus = Literal["NORMAL", "WARNING", "CRITICAL", "FAILOVER"]
 
 
-def _start_of_today_utc() -> datetime:
+def start_of_today_utc() -> datetime:
     """Midnight UTC, naive -- matches `LLMUsage.timestamp`'s storage shape (SQLite's
     `func.now()` server_default writes a naive UTC timestamp), so this can be compared
     directly against that column without a timezone-aware/naive mismatch.
+
+    Public (not `_`-prefixed) so `app.api.routes.llm_usage`'s usage dashboard can
+    aggregate over the exact same "today" window this module uses for budget
+    tracking, instead of a second, potentially-drifting definition of "today".
     """
     now = datetime.now(timezone.utc)
     return datetime(now.year, now.month, now.day)
@@ -75,7 +79,7 @@ class QuotaManager:
             return 0
         return (
             self._db.query(LLMUsage)
-            .filter(LLMUsage.provider == provider, LLMUsage.timestamp >= _start_of_today_utc())
+            .filter(LLMUsage.provider == provider, LLMUsage.timestamp >= start_of_today_utc())
             .count()
         )
 

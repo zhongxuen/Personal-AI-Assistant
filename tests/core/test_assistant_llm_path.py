@@ -1,8 +1,9 @@
 """
-AssistantCore's NEEDS_LLM path (§20, §41 Rule 6, file 05/06).
+AssistantCore's LLM_REQUIRED path (§20, §41 Rule 6, file 05/06, file 08 prompt 1).
 
 `test_zero_llm.py` covers every deterministic command staying off the LLM path
-entirely; this file covers the other side: once `CommandRouter` returns `NEEDS_LLM`,
+entirely; this file covers the other side: once `CommandRouter` returns classification
+`LLM_REQUIRED`,
 `AssistantCore` calls `AIRouter.route()` (mocked here -- no real network call; AIRouter's
 own chain-walking/failover behavior is covered separately in tests/llm/test_ai_router.py),
 and:
@@ -31,7 +32,7 @@ from app.tools.base import ToolResult
 from app.tools.registry import ToolRegistry
 
 # Never matches any trigger/alias registered below -- CommandRouter always falls
-# through to NEEDS_LLM for it, regardless of what's in the registry.
+# through to classification LLM_REQUIRED for it, regardless of what's in the registry.
 UNRESOLVABLE_MESSAGE = "what's the weather like tomorrow?"
 
 
