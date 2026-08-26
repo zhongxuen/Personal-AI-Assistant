@@ -36,6 +36,7 @@ def test_poll_fires_notification_for_due_reminder_and_marks_it_sent(test_db, mon
 
     db = test_db()
     task = TaskService(db).create(title="Call dentist", due=datetime.now() - timedelta(minutes=1))
+    task_id = task.id
     db.close()
 
     ReminderScheduler(_registry())._poll()
@@ -46,7 +47,7 @@ def test_poll_fires_notification_for_due_reminder_and_marks_it_sent(test_db, mon
     assert kwargs["message"] == "Call dentist"
 
     db = test_db()
-    reminder = db.query(TaskReminder).filter(TaskReminder.task_id == task.id).one()
+    reminder = db.query(TaskReminder).filter(TaskReminder.task_id == task_id).one()
     assert reminder.sent is True
     db.close()
 
