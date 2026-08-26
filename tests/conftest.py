@@ -1,12 +1,14 @@
 """
-Shared fixtures (§37 Phase 2 / file 03, extended file 04 prompt 1).
+Shared fixtures (§37 Phase 2 / file 03, extended file 04 prompts 1 & 2).
 
-`app/tools/tasks.py`, `app/tools/routines.py`, and `app/tasks/scheduler.py` each open
-their own short-lived DB session via a module-level `SessionLocal` imported directly
-from `app.database.database` -- there's no dependency injection to swap a session in.
-`test_db` monkeypatches those module-level references to a throwaway in-memory SQLite
-database (shared across the whole fixture via `StaticPool`, since every tool call opens
-a brand new `Session`) so tests never touch the real `jarvis.db` file.
+`app/tools/tasks.py`, `app/tools/routines.py`, `app/tasks/scheduler.py`, and
+`app/routines/engine.py` each open their own short-lived DB session via a module-level
+`SessionLocal` imported directly from `app.database.database` -- there's no dependency
+injection to swap a session in. `test_db` monkeypatches those module-level references
+to a throwaway in-memory SQLite database (shared across the whole fixture via
+`StaticPool`, since every tool call opens a brand new `Session`) so tests never touch
+the real `jarvis.db` file. `app/routines/registry.py`'s `RoutineRegistry` takes an
+injected `Session` instead (same pattern as `TaskService`), so it needs no patch here.
 """
 
 from __future__ import annotations
@@ -37,6 +39,7 @@ def test_db(monkeypatch):
     monkeypatch.setattr("app.tools.tasks.SessionLocal", TestSessionLocal)
     monkeypatch.setattr("app.tools.routines.SessionLocal", TestSessionLocal)
     monkeypatch.setattr("app.tasks.scheduler.SessionLocal", TestSessionLocal)
+    monkeypatch.setattr("app.routines.engine.SessionLocal", TestSessionLocal)
 
     yield TestSessionLocal
 

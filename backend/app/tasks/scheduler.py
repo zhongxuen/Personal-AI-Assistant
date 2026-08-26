@@ -8,8 +8,10 @@ yet, firing each one as a `show_notification` tool call *through* `ToolExecutor`
 never printing/calling the notification tool's handler directly (§41 Rule 6) -- so
 every reminder still gets validated, permission-checked, and logged like any other tool
 call. Started once from `main.py`'s lifespan and shut down on app shutdown so it never
-outlives the process. Scheduled/triggered *routines* reusing this same scheduler
-instance are file 04 Prompt 2's job -- this file only handles task reminders.
+outlives the process. `app/routines/scheduler.py`'s `RoutineScheduler` (file 04 prompt
+2, optional) registers its own cron jobs against `self.scheduler` -- the same
+background thread -- instead of starting a second `BackgroundScheduler`; this file
+still only handles task reminders itself.
 """
 
 from __future__ import annotations
@@ -38,6 +40,14 @@ class ReminderScheduler:
     def __init__(self, registry: ToolRegistry) -> None:
         self._registry = registry
         self._scheduler = BackgroundScheduler(daemon=True)
+
+    @property
+    def scheduler(self) -> BackgroundScheduler:
+        """The underlying APScheduler instance, exposed so other schedule-driven
+        features (file 04 prompt 2's optional `RoutineScheduler`) can register their
+        own jobs against this same background thread instead of starting a second one.
+        """
+        return self._scheduler
 
     def start(self) -> None:
         self._scheduler.add_job(

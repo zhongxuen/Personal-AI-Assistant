@@ -1,55 +1,70 @@
 """
-Routine tool (§37 Phase 2 / file 03).
+Routine tool (§37 Phase 2 / file 03, replaced file 04 prompt 2).
 
-`run_routine` runs a named, hardcoded sequence of tool calls -- for this phase, exactly
-one routine, "coding": open VS Code -> open the portfolio folder -> open Chrome, proving
-the routine-without-LLM path from §13. Every step is dispatched through a `ToolExecutor`
-(never `tool.handler(...)` directly, §41 Rule 6) so each step still gets its own params
-validation, permission check, and `tool_execution_logs` row, exactly like a standalone
-tool call would. The real `RoutineEngine`/registry (config-driven, multiple routines,
-persisted via the `routines`/`routine_steps` tables from file 01) is file 04's job --
-don't build that generality here (§41 Rule 1).
+`run_routine` now runs any named routine persisted via `RoutineRegistry`/
+`RoutineEngine` (`app/routines/`), instead of file 03's hardcoded `ROUTINES` dict.
+`seed_default_routines()` creates the "coding" routine -- open VS Code -> open the
+portfolio folder -> open Chrome, the exact three steps file 03 hardcoded -- as a real
+persisted row the first time the app starts (`register_default_tools`, called once from
+`main.py`'s lifespan, calls this after registering `RunRoutineTool`). It's idempotent:
+every call after the first is a no-op, since it only seeds a name that's missing --
+never resurrecting a routine a user has since edited or deleted.
+
+`RunRoutineTool` is now a thin dispatcher onto `RoutineEngine.run()`, which is where the
+actual step-by-step `ToolExecutor` dispatch (§41 Rule 6) lives.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
-from app.core.permissions import PermissionLevel, RequesterContext
-from app.core.tool_executor import ToolExecutor
+from app.core.permissions import PermissionLevel
 from app.database.database import SessionLocal
+from app.routines.registry import RoutineRegistry
 from app.tools.base import ToolResult
 from app.tools.registry import ToolRegistry
 
-# routine name -> ordered list of (tool_name, params) steps to run via ToolExecutor.
-# Hardcoded for this phase only -- file 04 replaces this with the persisted
-# `routines`/`routine_steps` tables.
-ROUTINES: dict[str, list[tuple[str, dict[str, Any]]]] = {
-    "coding": [
-        ("open_application", {"app_name": "vscode"}),
-        ("open_application", {"app_name": "portfolio folder"}),
-        ("open_application", {"app_name": "chrome"}),
-    ],
-}
+DEFAULT_ROUTINE_NAME = "coding"
+
+# Seeded once at first startup via seed_default_routines() -- see module docstring.
+# Kept here (not in app/routines/) since this is the one concrete routine this project
+# ships with; app/routines/ itself stays generic (registry + engine, no fixed content).
+DEFAULT_ROUTINE_STEPS: list[tuple[str, dict[str, Any]]] = [
+    ("open_application", {"app_name": "vscode"}),
+    ("open_application", {"app_name": "portfolio folder"}),
+    ("open_application", {"app_name": "chrome"}),
+]
 
 
-def _known_routines() -> str:
-    return ", ".join(sorted(ROUTINES))
+def seed_default_routines() -> None:
+    """Create the "coding" routine as a persisted row if it doesn't already exist.
+
+    Idempotent -- safe to call on every startup. Requires the `routines`/
+    `routine_steps` tables to already exist (`main.py`'s lifespan runs
+    `Base.metadata.create_all` before `register_default_tools`, which calls this).
+    """
+    db = SessionLocal()
+    try:
+        registry = RoutineRegistry(db)
+        if registry.get_routine(DEFAULT_ROUTINE_NAME) is None:
+            registry.create_routine(DEFAULT_ROUTINE_NAME, DEFAULT_ROUTINE_STEPS)
+    finally:
+        db.close()
 
 
 class RunRoutineTool:
-    """Runs a hardcoded named routine as a sequence of `ToolExecutor.execute()` calls."""
+    """Runs a named, persisted routine via `RoutineEngine`."""
 
     name = "run_routine"
-    description = "Run a named routine: a hardcoded sequence of tool calls (e.g. 'coding')."
+    description = "Run a named routine: a persisted, ordered sequence of tool calls (e.g. 'coding')."
     parameters: dict[str, Any] = {
         "type": "object",
         "properties": {
             "routine_name": {
                 "type": "string",
                 "description": (
-                    "Name of the routine to run. Defaults to 'coding', the only routine "
-                    "hardcoded this phase."
+                    "Name of the routine to run. Defaults to 'coding', the routine "
+                    "seeded at first startup."
                 ),
             }
         },
@@ -60,44 +75,15 @@ class RunRoutineTool:
     requires_confirmation = False
 
     def __init__(self, registry: ToolRegistry) -> None:
-        # Steps are dispatched through a ToolExecutor built on this same registry, not
-        # by calling each tool's handler directly -- so logging/permissions apply to
-        # every step (§41 Rule 6).
+        # Held onto so RoutineEngine (built lazily in handler()) dispatches steps
+        # through the same process-wide ToolRegistry every other tool call uses.
         self._registry = registry
 
-    def handler(self, routine_name: str = "coding", **kwargs: Any) -> ToolResult:
-        steps = ROUTINES.get(routine_name)
-        if steps is None:
-            return ToolResult(
-                success=False,
-                error=f"No routine named '{routine_name}'. Known routines: {_known_routines()}.",
-            )
+    def handler(self, routine_name: str = DEFAULT_ROUTINE_NAME, **kwargs: Any) -> ToolResult:
+        # Imported lazily (not at module level) to break the app.tools <-> app.core.tool_executor
+        # import cycle: ToolExecutor imports app.tools.base, which forces the whole app.tools
+        # package (this module included) to finish loading first, so a top-level import here
+        # would deadlock if anything imports app.core.tool_executor before app.tools.
+        from app.routines.engine import RoutineEngine
 
-        db = SessionLocal()
-        try:
-            executor = ToolExecutor(self._registry, db=db)
-            context = RequesterContext(platform="desktop", scope="routine")
-
-            completed: list[dict[str, Any]] = []
-            for step_tool_name, step_params in steps:
-                result = executor.execute(step_tool_name, step_params, context)
-                completed.append(
-                    {"tool_name": step_tool_name, "params": step_params, "result": result.model_dump()}
-                )
-                if not result.success:
-                    return ToolResult(
-                        success=False,
-                        error=f"Routine '{routine_name}' failed at step '{step_tool_name}': {result.error}",
-                        data={"routine": routine_name, "steps": completed},
-                    )
-
-            return ToolResult(
-                success=True,
-                data={
-                    "message": f"Ran routine '{routine_name}' ({len(completed)} step(s)).",
-                    "routine": routine_name,
-                    "steps": completed,
-                },
-            )
-        finally:
-            db.close()
+        return RoutineEngine(self._registry).run(routine_name)

@@ -17,7 +17,11 @@ One test per tool built in this file, plus the `run_routine` end-to-end path:
     (`test_db`, from tests/conftest.py)
   - run_routine("coding") triggers its three open_application steps, in order, through
     the same ToolExecutor path every standalone tool call uses (§41 Rule 6) -- the OS
-    launch call is mocked so nothing actually launches VS Code/Chrome in CI.
+    launch call is mocked so nothing actually launches VS Code/Chrome in CI. The
+    "coding" routine itself is now a persisted row (via `seed_default_routines`,
+    `app/routines/registry.py`/`engine.py`, file 04 prompt 2) rather than the hardcoded
+    dict file 03 originally used here -- see tests/routines/ for registry/engine
+    coverage in isolation.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ from unittest.mock import Mock, call
 from app.tools import applications as applications_module
 from app.tools.applications import APP_MAP, close_application_tool, open_application_tool
 from app.tools.registry import ToolRegistry
-from app.tools.routines import RunRoutineTool
+from app.tools.routines import RunRoutineTool, seed_default_routines
 from app.tools.system import get_time_tool
 from app.tools.tasks import (
     complete_task_tool,
@@ -209,6 +213,7 @@ def test_complete_task_unknown_id_fails(test_db):
 
 def test_run_routine_coding_triggers_three_open_application_calls_in_order(monkeypatch, test_db):
     mock_startfile, mock_popen = _patch_launch(monkeypatch)
+    seed_default_routines()  # persists the "coding" routine into test_db
 
     registry = ToolRegistry()
     registry.register(open_application_tool)
@@ -239,6 +244,7 @@ def test_run_routine_defaults_to_coding(monkeypatch, test_db):
     carries no params) still resolves to the right routine (§11 exact-alias match).
     """
     _patch_launch(monkeypatch)
+    seed_default_routines()  # persists the "coding" routine into test_db
 
     registry = ToolRegistry()
     registry.register(open_application_tool)
