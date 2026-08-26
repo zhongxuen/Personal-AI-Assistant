@@ -4,6 +4,11 @@ Covers `md-files/12-web-client-vercel.md` prompt 3 (§31, §32, §33). Two indep
 the frontend to **Vercel**, the backend/API to **Render**'s free web-service tier. Neither one
 bundles secrets into the other — see [Secrets boundary](#secrets-boundary) before anything else.
 
+**Live instances** (personal deployment, as of this writing):
+- Backend: `https://jarvis-api-hi10.onrender.com` (Render free web service, name `jarvis-api`)
+- Frontend: `https://personal-ai-assistant-goh-zhong-xuen-s-projects.vercel.app` (Vercel project
+  `personal-ai-assistant`)
+
 ## Secrets boundary
 
 `Frontend → Backend/API → Gemini`, never `Frontend → Gemini` directly (§31). Concretely:
@@ -55,7 +60,7 @@ Set these on the **backend host** (Render dashboard → service → Environment)
 | Variable | Required | Notes |
 |---|---|---|
 | `APP_ENV` | yes | `production` — silences the "still on dev DB defaults" assumptions and makes the insecure-`AUTH_SECRET_KEY` check actually fire. |
-| `CORS_ORIGINS` | yes | Exact deployed frontend origin, e.g. `https://jarvis-web.vercel.app`. Comma-separate if there's more than one (e.g. a Vercel preview URL too). |
+| `CORS_ORIGINS` | yes | Exact deployed frontend origin, e.g. `https://personal-ai-assistant-goh-zhong-xuen-s-projects.vercel.app`. Comma-separate if there's more than one (e.g. a Vercel preview URL too). |
 | `AUTH_SECRET_KEY` | yes | Long random value, **not** the shipped dev default. Generate: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
 | `AUTH_SEED_USERNAME` / `AUTH_SEED_PASSWORD` | yes (or you can't log in) | One-time bootstrap user, created at startup if it doesn't already exist. |
 | `GEMINI_API_KEY` | yes, for LLM features | Unset → `GeminiProvider.is_available()` is `False`, not an error (deterministic tool routing still works). |
@@ -67,7 +72,7 @@ Set on the **frontend host** (Vercel → project → Settings → Environment Va
 
 | Variable | Required | Notes |
 |---|---|---|
-| `VITE_API_BASE_URL` | yes | The deployed backend's base URL, e.g. `https://jarvis-api.onrender.com` (no trailing slash, no `/api` suffix — routes already include it). Left unset, the frontend calls relative `/api/...` paths, which only works behind Vite's dev proxy. |
+| `VITE_API_BASE_URL` | yes | The deployed backend's base URL, e.g. `https://jarvis-api-hi10.onrender.com` (no trailing slash, no `/api` suffix — routes already include it). Left unset, the frontend calls relative `/api/...` paths, which only works behind Vite's dev proxy. |
 
 ## Deploy order
 
@@ -83,40 +88,64 @@ order:
 ### 1. Backend → Render
 
 1. Push this repo to GitHub (already done — `origin` is `zhongxuen/Personal-AI-Assistant`).
-2. In the [Render dashboard](https://dashboard.render.com), **New → Blueprint**, connect the
-   GitHub repo. Render reads `render.yaml` at the repo root and proposes one service,
-   `jarvis-api`, rooted at `backend/`, on the free plan.
-3. Render pauses at apply time for every `sync: false` var in `render.yaml` — fill in
-   `AUTH_SECRET_KEY`, `AUTH_SEED_USERNAME`, `AUTH_SEED_PASSWORD`, `GEMINI_API_KEY` (leave
-   `CORS_ORIGINS` blank for now, step 3 below sets it once the frontend URL exists).
-4. Deploy. Confirm `GET https://<service>.onrender.com/api/health` returns
+2. In the [Render dashboard](https://dashboard.render.com) → **New → Blueprint**. If GitHub
+   isn't connected to Render yet, it'll prompt a GitHub App install first — pick "Only select
+   repositories" and choose just this repo, not blanket access to every repo in the account.
+3. Select `zhongxuen/Personal-AI-Assistant`, branch `main`. Render finds `render.yaml` at the
+   repo root and proposes one service, `jarvis-api`, rooted at `backend/`, on the free plan.
+4. Render pauses at apply time for every `sync: false` var in `render.yaml` — fill in
+   `AUTH_SECRET_KEY` (e.g. `python -c "import secrets; print(secrets.token_urlsafe(48))"`),
+   `AUTH_SEED_USERNAME`, `AUTH_SEED_PASSWORD`, `GEMINI_API_KEY`. `CORS_ORIGINS` can be filled in
+   now if the Vercel project (and its stable production domain) already exists — Vercel assigns
+   that domain the first time a project is created, before the first successful deploy — otherwise
+   leave it blank and set it in step 3 below.
+5. Deploy Blueprint. Confirm `GET https://<service>.onrender.com/api/health` returns
    `{"status": "ok", "service": "jarvis-backend"}`.
-5. Confirm login works: `POST /api/auth/login` (form-encoded `username`/`password` — the
+6. Confirm login works: `POST /api/auth/login` (form-encoded `username`/`password` — the
    `AUTH_SEED_*` values) returns a bearer token, and a route like `GET /api/tasks` with
    `Authorization: Bearer <token>` succeeds while the same call without the header 401s.
 
 ### 2. Frontend → Vercel
 
-1. `cd frontend && vercel link` (first time: creates/links a Vercel project for this repo's
-   `frontend/` directory — pick "Vite" as the detected framework, root directory `frontend`).
-2. Set the env var: `vercel env add VITE_API_BASE_URL production` (paste the Render URL from
-   step 1.4, no trailing slash), and again for `preview` if you want preview deploys to also hit
+1. `vercel link` **from the repo root**, not from inside `frontend/` — if a Vercel project for
+   this repo already exists with Root Directory set to `frontend` (Project Settings → Build and
+   Deployment → Root Directory), running the CLI from inside `frontend/` uploads that
+   subdirectory's contents and then Vercel tries to apply the Root Directory *again* on top of it,
+   producing `The specified Root Directory "frontend" does not exist`. Running from the repo root
+   avoids the double-nesting.
+2. If Root Directory isn't already set to `frontend` for the linked project, set it in the
+   dashboard first (Project Settings → Build and Deployment) — a project whose Root Directory is
+   left at the repo root will fail to build this monorepo layout with `vite: command not found`
+   (it never `cd`s into `frontend/` before running `npm install`/`vite build`).
+3. Set the env var: `vercel env add VITE_API_BASE_URL production` (paste the Render URL from
+   step 1.5, no trailing slash), and again for `preview` if you want preview deploys to also hit
    the live backend.
-3. `vercel --prod` to build and deploy. Vercel runs `npm run build` (`tsc -b && vite build`) and
-   serves `frontend/dist/` as a static site — no server-side Vercel function involved, matching
-   `frontend/package.json`'s existing scripts unchanged.
-4. Note the resulting `https://<project>.vercel.app` URL.
+4. Check **Project Settings → Deployment Protection**: if "Vercel Authentication" is enabled, the
+   deployed URL redirects everyone (including you, outside a logged-in Vercel session) to a
+   Vercel SSO wall before the page even loads — on top of, not instead of, the app's own JWT
+   login. Disable it unless that extra gate is actually wanted.
+5. `vercel --prod` (from the repo root) to build and deploy. Vercel runs `npm run build`
+   (`tsc -b && vite build`) and serves `frontend/dist/` as a static site — no server-side Vercel
+   function involved, matching `frontend/package.json`'s existing scripts unchanged.
+6. Note the resulting `https://<project>.vercel.app` URL (the *stable* one, e.g.
+   `https://personal-ai-assistant-goh-zhong-xuen-s-projects.vercel.app` — not the
+   per-deployment `-<hash>-` one Vercel also prints, which changes every deploy).
 
 ### 3. Close the loop: backend `CORS_ORIGINS`
 
-Back in Render → `jarvis-api` → Environment, set `CORS_ORIGINS` to the Vercel URL from step 2.4
-(exact scheme+host, no path, no trailing slash; comma-separate if you also want a specific
-preview URL allowed). Render redeploys automatically. Reload the Vercel site and confirm
-dashboard requests (Tasks/Routines/Provider Status) no longer fail with a CORS error in the
-browser console.
+Back in Render → `jarvis-api` → Environment, set `CORS_ORIGINS` to the *stable* Vercel URL from
+step 2.6 (exact scheme+host, no path, no trailing slash; comma-separate if you also want a
+specific preview URL allowed). Render redeploys automatically. Reload the Vercel site and confirm
+dashboard requests (Tasks/Routines/Provider Status) fail with `Not authenticated` (expected — see
+[Known limitations](#known-limitations)) rather than a CORS error in the browser console; a CORS
+error means the origin string doesn't match exactly.
 
 ## Known limitations
 
+- **Free instance spin-down** — Render's free web service spins down after periods of
+  inactivity; the first request after an idle period can take 50+ seconds while it cold-starts
+  (Render's own dashboard surfaces this warning on the service). Not a bug — the alternative on
+  the free tier is paying for an always-on instance.
 - **SQLite persistence** — Render's free web-service plan has no persistent disk; `jarvis.db`
   lives on the container's ephemeral filesystem and is wiped on every redeploy and on the
   periodic restart free instances get after idling. Fine for demoing the deployed dashboards;
