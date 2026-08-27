@@ -49,6 +49,12 @@ uvicorn main:app --reload
 
 Serves on `http://127.0.0.1:8000`. Health check: `GET /api/health`.
 
+The Discord bot isn't a separate process — it starts automatically inside the backend
+(`main.py`'s lifespan) whenever `DISCORD_BOT_TOKEN` is set in `.env`. On Windows, run
+`.\scripts\start-discord-bot.ps1` from the repo root instead of the command above for a
+one-shot script that activates the venv, checks `DISCORD_BOT_TOKEN` is set, and boots
+the backend (pass `-Reload` for the `--reload` dev flow).
+
 **Frontend** (from `frontend/`):
 
 ```bash
