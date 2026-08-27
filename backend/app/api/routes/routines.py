@@ -79,6 +79,10 @@ class RoutineStepsUpdate(BaseModel):
     steps: list[RoutineStepIn]
 
 
+class RoutineEnabledUpdate(BaseModel):
+    enabled: bool
+
+
 class RoutineRunResult(BaseModel):
     success: bool
     message: str | None = None
@@ -164,6 +168,24 @@ def update_routine_steps(
 ) -> dict[str, Any]:
     steps = _as_step_tuples(payload.steps, tool_registry)
     routine = RoutineRegistry(db).update_routine(name, steps)
+    if routine is None:
+        raise HTTPException(status_code=404, detail=f"No routine named '{name}'.")
+    return _serialize_routine(routine)
+
+
+@router.patch("/routines/{name}", response_model=RoutineOut)
+def set_routine_enabled(
+    name: str,
+    payload: RoutineEnabledUpdate,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """The Routine Dashboard's "Stop"/"Start" toggle: flips `enabled` without touching
+    steps. `RoutineEngine.run()` already refuses to run a disabled routine (both from
+    this file's `/run` route and from `RunRoutineTool`/`RoutineScheduler`), so this is
+    the missing piece that lets a routine actually be taken offline from the web
+    instead of only ever being deleted outright.
+    """
+    routine = RoutineRegistry(db).set_enabled(name, payload.enabled)
     if routine is None:
         raise HTTPException(status_code=404, detail=f"No routine named '{name}'.")
     return _serialize_routine(routine)

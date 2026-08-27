@@ -155,6 +155,40 @@ def test_update_steps_unknown_tool_rejected(client):
     assert response.status_code == 422
 
 
+def test_set_enabled_stops_and_starts_routine(client):
+    """The "Stop"/"Start" toggle: `PATCH /routines/{name}` flips `enabled` without
+    touching steps, and a disabled routine is refused by `/run` (RoutineEngine.run()'s
+    own `if not routine.enabled` check) rather than silently running anyway.
+    """
+    client.post(
+        "/api/routines",
+        json={"name": "demo", "steps": [{"tool_name": "stub_first", "params": {"a": 1}}]},
+    )
+
+    response = client.patch("/api/routines/demo", json={"enabled": False})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["enabled"] is False
+    assert body["steps"] == [{"tool_name": "stub_first", "params": {"a": 1}}]
+
+    run_response = client.post("/api/routines/demo/run")
+    assert run_response.status_code == 200
+    run_body = run_response.json()
+    assert run_body["success"] is False
+    assert "disabled" in run_body["error"]
+
+    response = client.patch("/api/routines/demo", json={"enabled": True})
+    assert response.status_code == 200
+    assert response.json()["enabled"] is True
+
+    run_response = client.post("/api/routines/demo/run")
+    assert run_response.json()["success"] is True
+
+
+def test_set_enabled_unknown_routine_404(client):
+    assert client.patch("/api/routines/nope", json={"enabled": False}).status_code == 404
+
+
 def test_delete_routine(client):
     client.post("/api/routines", json={"name": "demo", "steps": []})
     assert client.delete("/api/routines/demo").status_code == 204

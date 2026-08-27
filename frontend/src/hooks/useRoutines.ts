@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
-import { createRoutine, deleteRoutine, getRoutines, getTools, runRoutine, updateRoutineSteps } from '../services/api'
+import {
+  createRoutine,
+  deleteRoutine,
+  getRoutines,
+  getTools,
+  runRoutine,
+  setRoutineEnabled,
+  updateRoutineSteps,
+} from '../services/api'
 import type { Routine, RoutineRunResult, RoutineStep, ToolInfo } from '../types/routine'
 
 interface UseRoutinesResult {
@@ -12,6 +20,7 @@ interface UseRoutinesResult {
   updateSteps: (name: string, steps: RoutineStep[]) => Promise<void>
   remove: (name: string) => Promise<void>
   run: (name: string) => Promise<RoutineRunResult>
+  setEnabled: (name: string, enabled: boolean) => Promise<void>
 }
 
 /** Loads routines plus the available tool catalog (for the step editor's tool picker),
@@ -81,5 +90,13 @@ export function useRoutines(): UseRoutinesResult {
     [refresh],
   )
 
-  return { routines, tools, loading, error, refresh, create, updateSteps, remove, run }
+  const setEnabled = useCallback(
+    async (name: string, enabled: boolean) => {
+      await setRoutineEnabled(name, enabled)
+      refresh()
+    },
+    [refresh],
+  )
+
+  return { routines, tools, loading, error, refresh, create, updateSteps, remove, run, setEnabled }
 }

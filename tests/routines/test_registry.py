@@ -100,6 +100,31 @@ def test_update_routine_unknown_name_returns_none(test_db):
     db.close()
 
 
+def test_set_enabled_toggles_flag_without_touching_steps(test_db):
+    db = test_db()
+    registry = RoutineRegistry(db)
+    registry.create_routine("coding", _steps())
+
+    disabled = registry.set_enabled("coding", False)
+    assert disabled is not None
+    assert disabled.enabled is False
+    assert [s.tool_name for s in disabled.steps] == ["open_application", "open_application"]
+    assert registry.get_routine("coding").enabled is False
+
+    enabled = registry.set_enabled("coding", True)
+    assert enabled is not None
+    assert enabled.enabled is True
+    db.close()
+
+
+def test_set_enabled_unknown_name_returns_none(test_db):
+    db = test_db()
+    registry = RoutineRegistry(db)
+
+    assert registry.set_enabled("nope", False) is None
+    db.close()
+
+
 def test_delete_routine_removes_it_and_its_steps(test_db):
     db = test_db()
     registry = RoutineRegistry(db)

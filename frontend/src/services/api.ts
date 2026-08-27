@@ -173,6 +173,16 @@ export async function updateRoutineSteps(name: string, steps: RoutineStep[]): Pr
   return response.json() as Promise<Routine>
 }
 
+export async function setRoutineEnabled(name: string, enabled: boolean): Promise<Routine> {
+  const response = await fetch(`${API_BASE_URL}/api/routines/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ enabled }),
+  })
+  await ensureOk(response, `Failed to ${enabled ? 'start' : 'stop'} routine: ${response.status}`)
+  return response.json() as Promise<Routine>
+}
+
 export async function deleteRoutine(name: string): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/routines/${encodeURIComponent(name)}`, {
     method: 'DELETE',

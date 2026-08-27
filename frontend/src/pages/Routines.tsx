@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { FormEvent } from 'react'
-import { ArrowDown, ArrowUp, Plus, Repeat, Trash2 } from 'lucide-react'
+import { ArrowDown, ArrowUp, Pause, Play, Plus, Repeat, Trash2 } from 'lucide-react'
 import { useRoutines } from '../hooks/useRoutines'
 import type { Routine, RoutineRunResult, RoutineStep, ToolInfo } from '../types/routine'
 import { Button, ConfirmDialog, Input, Panel, Select, Skeleton, StaggerItem, StaggerList, useToast } from '../components/ui'
@@ -146,7 +146,7 @@ function StepEditor({
 }
 
 export function RoutinesPage() {
-  const { routines, tools, loading, error, create, updateSteps, remove: removeRoutine, run } = useRoutines()
+  const { routines, tools, loading, error, create, updateSteps, remove: removeRoutine, run, setEnabled } = useRoutines()
   const { show } = useToast()
 
   const [newName, setNewName] = useState('')
@@ -161,6 +161,7 @@ export function RoutinesPage() {
 
   const [runResults, setRunResults] = useState<Record<string, RoutineRunResult>>({})
   const [runningName, setRunningName] = useState<string | null>(null)
+  const [togglingName, setTogglingName] = useState<string | null>(null)
 
   // Toast-based confirmation replacing `window.confirm()` (§5).
   const [pendingDelete, setPendingDelete] = useState<string | null>(null)
@@ -240,6 +241,18 @@ export function RoutinesPage() {
     }
   }
 
+  async function handleToggleEnabled(routine: Routine) {
+    setTogglingName(routine.name)
+    try {
+      await setEnabled(routine.name, !routine.enabled)
+      show(`Routine '${routine.name}' ${routine.enabled ? 'stopped' : 'started'}.`, 'success')
+    } catch (err) {
+      show(err instanceof Error ? err.message : 'Failed to update routine.', 'danger')
+    } finally {
+      setTogglingName(null)
+    }
+  }
+
   return (
     <main className="px-6 py-10">
       <div className="mx-auto max-w-4xl">
@@ -291,6 +304,11 @@ export function RoutinesPage() {
                     <span className="ml-2 text-xs text-text-muted">
                       {routine.steps.length} step{routine.steps.length === 1 ? '' : 's'} · {routine.trigger_type}
                     </span>
+                    {!routine.enabled && (
+                      <span className="ml-2 rounded-full border border-warning/50 bg-warning/10 px-2 py-0.5 text-xs text-warning">
+                        Stopped
+                      </span>
+                    )}
                     {desktopOnlySteps.length > 0 && (
                       <p className="mt-1 text-xs text-warning">
                         Includes desktop-only step{desktopOnlySteps.length === 1 ? '' : 's'} (
@@ -300,8 +318,31 @@ export function RoutinesPage() {
                     )}
                   </div>
                   <div className="flex gap-2">
-                    <Button onClick={() => handleRun(routine.name)} disabled={runningName === routine.name} loading={runningName === routine.name}>
+                    <Button
+                      onClick={() => handleRun(routine.name)}
+                      disabled={runningName === routine.name || !routine.enabled}
+                      loading={runningName === routine.name}
+                      title={routine.enabled ? undefined : 'This routine is stopped -- start it again to run it.'}
+                    >
                       Run now
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      onClick={() => handleToggleEnabled(routine)}
+                      disabled={togglingName === routine.name}
+                      loading={togglingName === routine.name}
+                    >
+                      {routine.enabled ? (
+                        <>
+                          <Pause className="h-3.5 w-3.5" />
+                          Stop
+                        </>
+                      ) : (
+                        <>
+                          <Play className="h-3.5 w-3.5" />
+                          Start
+                        </>
+                      )}
                     </Button>
                     {editingName === routine.name ? (
                       <Button variant="ghost" onClick={() => setEditingName(null)}>

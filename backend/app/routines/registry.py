@@ -94,6 +94,21 @@ class RoutineRegistry:
         self.db.refresh(routine)
         return self._to_data(routine)
 
+    def set_enabled(self, name: str, enabled: bool) -> RoutineData | None:
+        """Flip a routine's `enabled` flag without touching its steps -- the "Stop"/
+        "Start" toggle on the Routine Dashboard. A disabled routine is left fully
+        intact (steps, schedule registration) but `RoutineEngine.run()` refuses to run
+        it (see its own `if not routine.enabled` check), so this is how a routine gets
+        taken offline without deleting it. Returns `None` if no routine has that name.
+        """
+        routine = self.db.query(Routine).filter(Routine.name == name).one_or_none()
+        if routine is None:
+            return None
+        routine.enabled = enabled
+        self.db.commit()
+        self.db.refresh(routine)
+        return self._to_data(routine)
+
     def delete_routine(self, name: str) -> bool:
         routine = self.db.query(Routine).filter(Routine.name == name).one_or_none()
         if routine is None:
