@@ -2,9 +2,13 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { ArrowDown, ArrowUp, Pause, Play, Plus, Repeat, Trash2 } from 'lucide-react'
 import { useRoutines } from '../hooks/useRoutines'
+import { usePersistentState } from '../hooks/usePersistentState'
 import type { Routine, RoutineRunResult, RoutineStep, ToolInfo } from '../types/routine'
 import { Button, ConfirmDialog, Input, Panel, Select, Skeleton, StaggerItem, StaggerList, useToast } from '../components/ui'
 import { cn } from '../components/ui/utils'
+import { CodingRoutinePanel } from '../components/CodingRoutinePanel'
+
+const CODING_ROUTINE_NAME = 'coding'
 
 /** A step mid-edit: params are kept as raw JSON text so the textarea doesn't fight the
  * user while they're typing, and parsed/validated only when the routine is saved.
@@ -146,15 +150,20 @@ function StepEditor({
 }
 
 export function RoutinesPage() {
-  const { routines, tools, loading, error, create, updateSteps, remove: removeRoutine, run, setEnabled } = useRoutines()
+  const { routines, tools, loading, error, create, updateSteps, rename, remove: removeRoutine, run, setEnabled } =
+    useRoutines()
   const { show } = useToast()
 
-  const [newName, setNewName] = useState('')
-  const [newSteps, setNewSteps] = useState<EditableStep[]>([])
+  // Persisted (§ user report) so a mid-creation draft survives a refresh -- or Chrome
+  // discarding this tab in the background -- instead of vanishing. Everything else in
+  // this form (createError, creating) is transient UI state that's fine to lose.
+  const [newName, setNewName] = usePersistentState('jarvis:routines:newName', '')
+  const [newSteps, setNewSteps] = usePersistentState<EditableStep[]>('jarvis:routines:newSteps', [])
   const [createError, setCreateError] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
 
   const [editingName, setEditingName] = useState<string | null>(null)
+  const [editNameValue, setEditNameValue] = useState('')
   const [editSteps, setEditSteps] = useState<EditableStep[]>([])
   const [editError, setEditError] = useState<string | null>(null)
   const [saving, setSaving] = useState(false)
@@ -194,12 +203,18 @@ export function RoutinesPage() {
 
   function startEdit(routine: Routine) {
     setEditingName(routine.name)
+    setEditNameValue(routine.name)
     setEditSteps(toEditable(routine.steps))
     setEditError(null)
   }
 
   async function handleSaveEdit() {
     if (!editingName) return
+    const trimmedName = editNameValue.trim()
+    if (!trimmedName) {
+      setEditError('A routine needs a name.')
+      return
+    }
     const parsed = parseSteps(editSteps)
     if ('error' in parsed) {
       setEditError(parsed.error)
@@ -208,7 +223,12 @@ export function RoutinesPage() {
     setSaving(true)
     setEditError(null)
     try {
-      await updateSteps(editingName, parsed.steps)
+      let currentName = editingName
+      if (trimmedName !== editingName) {
+        await rename(editingName, trimmedName)
+        currentName = trimmedName
+      }
+      await updateSteps(currentName, parsed.steps)
       setEditingName(null)
     } catch (err) {
       setEditError(err instanceof Error ? err.message : 'Failed to update routine.')
@@ -253,12 +273,36 @@ export function RoutinesPage() {
     }
   }
 
+  /** `CodingRoutinePanel`'s single "Start coding" action: save its built steps into the
+   * "coding" routine (creating it if a user has since deleted it -- it's normally
+   * always present, seeded at first startup, `app/tools/routines.py`), then run it --
+   * the same create/update-then-run split every other routine already goes through,
+   * just driven by the builder's project/window picker instead of the raw step editor.
+   */
+  async function handleStartCoding(steps: RoutineStep[]): Promise<RoutineRunResult> {
+    const exists = routines.some((r) => r.name === CODING_ROUTINE_NAME)
+    if (exists) {
+      await updateSteps(CODING_ROUTINE_NAME, steps)
+    } else {
+      await create(CODING_ROUTINE_NAME, steps)
+    }
+    return run(CODING_ROUTINE_NAME)
+  }
+
   return (
     <main className="px-6 py-10">
       <div className="mx-auto max-w-4xl">
         <p className="text-sm text-text-muted">
           Named sequences of tool calls. Run one on demand, or edit its steps below.
         </p>
+
+        <div className="mt-6">
+          <CodingRoutinePanel
+            routine={routines.find((r) => r.name === CODING_ROUTINE_NAME)}
+            loading={loading}
+            onSaveAndRun={handleStartCoding}
+          />
+        </div>
 
         {/* Skeleton loaders (§5) instead of a blank list while routines fetch --
             shaped like a routine card (name/meta line + button row). */}
@@ -350,7 +394,7 @@ export function RoutinesPage() {
                       </Button>
                     ) : (
                       <Button variant="ghost" onClick={() => startEdit(routine)}>
-                        Edit steps
+                        Edit
                       </Button>
                     )}
                     <Button variant="destructive" onClick={() => setPendingDelete(routine.name)}>
@@ -361,11 +405,20 @@ export function RoutinesPage() {
 
                 {editingName === routine.name ? (
                   <div className="mt-3 border-t border-border pt-3">
-                    <StepEditor steps={editSteps} tools={tools} onChange={setEditSteps} />
+                    <label className="block text-xs font-medium text-text-muted">Name</label>
+                    <Input
+                      className="mt-1 w-64"
+                      value={editNameValue}
+                      onChange={(e) => setEditNameValue(e.target.value)}
+                      placeholder="routine name"
+                    />
+                    <div className="mt-3">
+                      <StepEditor steps={editSteps} tools={tools} onChange={setEditSteps} />
+                    </div>
                     {editError && <p className="mt-2 text-sm text-danger">{editError}</p>}
                     <div className="mt-3 flex gap-2">
                       <Button onClick={handleSaveEdit} disabled={saving} loading={saving}>
-                        Save steps
+                        Save
                       </Button>
                     </div>
                   </div>

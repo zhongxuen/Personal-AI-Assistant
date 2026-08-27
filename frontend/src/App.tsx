@@ -3,6 +3,7 @@ import type { ComponentType } from 'react'
 import {
   Activity,
   Cpu,
+  History,
   ListChecks,
   LogOut,
   Menu,
@@ -14,6 +15,7 @@ import { StatusPage } from './pages/StatusPage'
 import { TasksPage } from './pages/Tasks'
 import { RoutinesPage } from './pages/Routines'
 import { ProviderStatusPage } from './pages/ProviderStatus'
+import { ActivityPage } from './pages/Activity'
 import { SettingsPage } from './pages/Settings'
 import { ChatPage } from './pages/Chat'
 import { LoginPage } from './pages/Login'
@@ -24,20 +26,29 @@ import { cn } from './components/ui/utils'
 import { useAuth } from './hooks/useAuth'
 import { useLlmUsage } from './hooks/useLlmUsage'
 import { useMediaQuery } from './hooks/useMediaQuery'
+import { usePersistentState } from './hooks/usePersistentState'
 
-type View = 'chat' | 'status' | 'tasks' | 'routines' | 'providers' | 'settings'
+type View = 'chat' | 'status' | 'tasks' | 'routines' | 'providers' | 'activity' | 'settings'
 
 const NAV_ITEMS: { id: View; label: string; icon: ComponentType<{ className?: string }> }[] = [
   { id: 'chat', label: 'Chat', icon: MessageSquare },
   { id: 'tasks', label: 'Tasks', icon: ListChecks },
   { id: 'routines', label: 'Routines', icon: Repeat },
   { id: 'providers', label: 'AI Providers', icon: Cpu },
+  { id: 'activity', label: 'Activity', icon: History },
   { id: 'settings', label: 'Settings', icon: SettingsIcon },
   { id: 'status', label: 'Status', icon: Activity },
 ]
 
+const VALID_VIEWS = new Set<View>(NAV_ITEMS.map((item) => item.id))
+
 function App() {
-  const [view, setView] = useState<View>('chat')
+  // Persisted (§ user report) so a refresh -- or Chrome discarding this tab in the
+  // background and reloading it fresh next time it's shown -- lands back on whatever
+  // tab the user was actually on instead of always resetting to Chat. Guarded against
+  // a stale value from a previous build that removed/renamed a nav item.
+  const [view, setView] = usePersistentState<View>('jarvis:view', 'chat')
+  const safeView = VALID_VIEWS.has(view) ? view : 'chat'
   // Desktop rail collapse (icon-only) and the separate mobile off-canvas drawer
   // (md-files/ui-development.md §3) are independent: collapsing the rail on desktop
   // shouldn't affect whether the drawer is open on a phone-width viewport, and vice
@@ -53,7 +64,7 @@ function App() {
   // every 15s instead of each opening their own independent interval.
   const llmUsage = useLlmUsage()
   const meteredProviders = (llmUsage.data?.providers ?? []).filter((p) => p.budget !== null)
-  const activeItem = NAV_ITEMS.find((item) => item.id === view)
+  const activeItem = NAV_ITEMS.find((item) => item.id === safeView)
 
   // §34 (file 12 prompt 2): every dashboard/chat/voice affordance below requires a
   // valid session -- reusing the same login flow protects the exact same backend
@@ -113,7 +124,7 @@ function App() {
               icon={item.icon}
               label={item.label}
               collapsed={collapsed}
-              active={view === item.id}
+              active={safeView === item.id}
               onClick={() => selectView(item.id)}
             />
           ))}
@@ -171,12 +182,13 @@ function App() {
         </header>
 
         <div className="flex-1">
-          {view === 'chat' && <ChatPage />}
-          {view === 'tasks' && <TasksPage />}
-          {view === 'routines' && <RoutinesPage />}
-          {view === 'providers' && <ProviderStatusPage llmUsage={llmUsage} />}
-          {view === 'settings' && <SettingsPage />}
-          {view === 'status' && <StatusPage />}
+          {safeView === 'chat' && <ChatPage />}
+          {safeView === 'tasks' && <TasksPage />}
+          {safeView === 'routines' && <RoutinesPage />}
+          {safeView === 'providers' && <ProviderStatusPage llmUsage={llmUsage} />}
+          {safeView === 'activity' && <ActivityPage />}
+          {safeView === 'settings' && <SettingsPage />}
+          {safeView === 'status' && <StatusPage />}
         </div>
       </div>
 

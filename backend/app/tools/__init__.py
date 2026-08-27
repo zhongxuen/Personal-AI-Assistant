@@ -18,12 +18,15 @@ category (file 09 prompt 2, promoting file 03's former hardcoded `APP_MAP`), the
 "coding" routine as a persisted row (file 04 prompt 2, file 09 prompt 2) whose middle
 step now reads its default-project app_name back off memory. Memory must be seeded
 first: the routine seed reads `coding.default_project` from it while building the
-routine's steps.
+routine's steps. The "projects" memory entry (scan roots for the Coding Routine
+template's project picker, `app/projects/discovery.py`) has no such ordering
+dependency on anything else here, so it's seeded independently.
 """
 
 from __future__ import annotations
 
 from app.memory.service import seed_default_memory
+from app.projects.discovery import seed_default_project_roots
 from app.tools.applications import (
     close_application_tool,
     open_application_tool,
@@ -89,3 +92,4 @@ def register_default_tools(registry: ToolRegistry) -> None:
     seed_default_memory()
     seed_default_applications()
     seed_default_routines()
+    seed_default_project_roots()

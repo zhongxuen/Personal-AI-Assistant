@@ -125,6 +125,62 @@ def test_set_enabled_unknown_name_returns_none(test_db):
     db.close()
 
 
+def test_rename_routine_updates_name_without_touching_steps_or_enabled(test_db):
+    db = test_db()
+    registry = RoutineRegistry(db)
+    registry.create_routine("coding", _steps())
+    registry.set_enabled("coding", False)
+
+    renamed = registry.rename_routine("coding", "coding-session")
+    assert renamed is not None
+    assert renamed.name == "coding-session"
+    assert renamed.enabled is False
+    assert [s.tool_name for s in renamed.steps] == ["open_application", "open_application"]
+    assert registry.get_routine("coding") is None
+    assert registry.get_routine("coding-session") is not None
+    db.close()
+
+
+def test_rename_routine_same_name_is_a_no_op(test_db):
+    db = test_db()
+    registry = RoutineRegistry(db)
+    registry.create_routine("coding", _steps())
+
+    renamed = registry.rename_routine("coding", "coding")
+    assert renamed is not None
+    assert renamed.name == "coding"
+    db.close()
+
+
+def test_rename_routine_blank_name_raises(test_db):
+    db = test_db()
+    registry = RoutineRegistry(db)
+    registry.create_routine("coding", _steps())
+
+    with pytest.raises(ValueError):
+        registry.rename_routine("coding", "  ")
+    db.close()
+
+
+def test_rename_routine_duplicate_name_raises(test_db):
+    db = test_db()
+    registry = RoutineRegistry(db)
+    registry.create_routine("coding", _steps())
+    registry.create_routine("music", _steps())
+
+    with pytest.raises(ValueError):
+        registry.rename_routine("coding", "music")
+    db.close()
+
+
+def test_rename_routine_unknown_name_returns_none(test_db):
+    db = test_db()
+    registry = RoutineRegistry(db)
+
+    assert registry.rename_routine("nope", "still-nope") is None
+    db.close()
+
+
 def test_delete_routine_removes_it_and_its_steps(test_db):
     db = test_db()
     registry = RoutineRegistry(db)

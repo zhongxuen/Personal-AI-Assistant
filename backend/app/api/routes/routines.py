@@ -79,8 +79,15 @@ class RoutineStepsUpdate(BaseModel):
     steps: list[RoutineStepIn]
 
 
-class RoutineEnabledUpdate(BaseModel):
-    enabled: bool
+class RoutineUpdate(BaseModel):
+    """Partial update for a routine's identity/status -- both fields optional so the
+    "Stop"/"Start" toggle (`enabled` only) and the name editor (`name` only, or both
+    at once) share the same `PATCH /routines/{name}` route instead of two competing
+    endpoints for what's really one "update this routine" concept.
+    """
+
+    name: str | None = None
+    enabled: bool | None = None
 
 
 class RoutineRunResult(BaseModel):
@@ -174,20 +181,38 @@ def update_routine_steps(
 
 
 @router.patch("/routines/{name}", response_model=RoutineOut)
-def set_routine_enabled(
+def update_routine(
     name: str,
-    payload: RoutineEnabledUpdate,
+    payload: RoutineUpdate,
     db: Session = Depends(get_db),
 ) -> dict[str, Any]:
-    """The Routine Dashboard's "Stop"/"Start" toggle: flips `enabled` without touching
-    steps. `RoutineEngine.run()` already refuses to run a disabled routine (both from
-    this file's `/run` route and from `RunRoutineTool`/`RoutineScheduler`), so this is
-    the missing piece that lets a routine actually be taken offline from the web
-    instead of only ever being deleted outright.
+    """The Routine Dashboard's "Stop"/"Start" toggle (`enabled`) and its name editor
+    (`name`) both land here -- either field, or both in one call. `RoutineEngine.run()`
+    already refuses to run a disabled routine (both from this file's `/run` route and
+    from `RunRoutineTool`/`RoutineScheduler`), so `enabled` is the missing piece that
+    lets a routine actually be taken offline from the web instead of only ever being
+    deleted outright; `name` is the equivalent for the "Rename" affordance, going
+    through `RoutineRegistry.rename_routine`'s same duplicate-name check
+    `create_routine` enforces.
     """
-    routine = RoutineRegistry(db).set_enabled(name, payload.enabled)
-    if routine is None:
-        raise HTTPException(status_code=404, detail=f"No routine named '{name}'.")
+    registry = RoutineRegistry(db)
+    current_name = name
+    if payload.name is not None:
+        try:
+            routine = registry.rename_routine(name, payload.name)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if routine is None:
+            raise HTTPException(status_code=404, detail=f"No routine named '{name}'.")
+        current_name = routine.name
+    if payload.enabled is not None:
+        routine = registry.set_enabled(current_name, payload.enabled)
+        if routine is None:
+            raise HTTPException(status_code=404, detail=f"No routine named '{current_name}'.")
+    elif payload.name is None:
+        routine = registry.get_routine(current_name)
+        if routine is None:
+            raise HTTPException(status_code=404, detail=f"No routine named '{name}'.")
     return _serialize_routine(routine)
 
 

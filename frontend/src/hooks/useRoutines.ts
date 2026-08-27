@@ -4,6 +4,7 @@ import {
   deleteRoutine,
   getRoutines,
   getTools,
+  renameRoutine,
   runRoutine,
   setRoutineEnabled,
   updateRoutineSteps,
@@ -18,6 +19,7 @@ interface UseRoutinesResult {
   refresh: () => void
   create: (name: string, steps: RoutineStep[]) => Promise<void>
   updateSteps: (name: string, steps: RoutineStep[]) => Promise<void>
+  rename: (name: string, newName: string) => Promise<void>
   remove: (name: string) => Promise<void>
   run: (name: string) => Promise<RoutineRunResult>
   setEnabled: (name: string, enabled: boolean) => Promise<void>
@@ -73,6 +75,14 @@ export function useRoutines(): UseRoutinesResult {
     [refresh],
   )
 
+  const rename = useCallback(
+    async (name: string, newName: string) => {
+      await renameRoutine(name, newName)
+      refresh()
+    },
+    [refresh],
+  )
+
   const remove = useCallback(
     async (name: string) => {
       await deleteRoutine(name)
@@ -98,5 +108,5 @@ export function useRoutines(): UseRoutinesResult {
     [refresh],
   )
 
-  return { routines, tools, loading, error, refresh, create, updateSteps, remove, run, setEnabled }
+  return { routines, tools, loading, error, refresh, create, updateSteps, rename, remove, run, setEnabled }
 }

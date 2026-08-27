@@ -2,9 +2,13 @@ import type { HealthResponse } from '../types/health'
 import type { Task, TaskCreateInput, TaskFilters, TaskUpdateInput } from '../types/task'
 import type { Routine, RoutineRunResult, RoutineStep, ToolInfo } from '../types/routine'
 import type { LLMUsageResponse } from '../types/llmUsage'
+import type { ActivityResponse } from '../types/activity'
 import type { ApplicationMapping, DefaultProject } from '../types/memory'
 import type { VoiceMessageResponse } from '../types/voice'
 import type { AssistantResponse } from '../types/assistant'
+import type { DiscordStatus } from '../types/discord'
+import type { DiagnosticCheck, DiagnosticsRunResult } from '../types/diagnostics'
+import type { Project, ProjectRoots } from '../types/project'
 import { authHeaders, clearToken, setToken } from './auth'
 
 // In dev, Vite proxies /api to the FastAPI backend (see vite.config.ts).
@@ -183,6 +187,16 @@ export async function setRoutineEnabled(name: string, enabled: boolean): Promise
   return response.json() as Promise<Routine>
 }
 
+export async function renameRoutine(name: string, newName: string): Promise<Routine> {
+  const response = await fetch(`${API_BASE_URL}/api/routines/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ name: newName }),
+  })
+  await ensureOk(response, `Failed to rename routine: ${response.status}`)
+  return response.json() as Promise<Routine>
+}
+
 export async function deleteRoutine(name: string): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/routines/${encodeURIComponent(name)}`, {
     method: 'DELETE',
@@ -200,12 +214,107 @@ export async function runRoutine(name: string): Promise<RoutineRunResult> {
   return response.json() as Promise<RoutineRunResult>
 }
 
+// --- Project discovery (Coding Routine template) ---------------------------------------
+//
+// Wraps `app.api.routes.projects` (backend/app/projects/discovery.py) -- the "which
+// project am I working on today?" picker behind the Coding Routine builder
+// (frontend/src/components/CodingRoutinePanel.tsx). `roots` is the scan-folder list
+// (edited from Settings); `getProjects` is that list's immediate subdirectories.
+
+export async function getProjects(): Promise<Project[]> {
+  const response = await fetch(`${API_BASE_URL}/api/projects`, { headers: authHeaders() })
+  await ensureOk(response, `Failed to load projects: ${response.status}`)
+  return response.json() as Promise<Project[]>
+}
+
+export async function getProjectRoots(): Promise<ProjectRoots> {
+  const response = await fetch(`${API_BASE_URL}/api/projects/roots`, { headers: authHeaders() })
+  await ensureOk(response, `Failed to load project folders: ${response.status}`)
+  return response.json() as Promise<ProjectRoots>
+}
+
+export async function setProjectRoots(roots: string[]): Promise<ProjectRoots> {
+  const response = await fetch(`${API_BASE_URL}/api/projects/roots`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ roots }),
+  })
+  await ensureOk(response, `Failed to save project folders: ${response.status}`)
+  return response.json() as Promise<ProjectRoots>
+}
+
 // --- LLM provider status (§8, §39) ----------------------------------------------------
 
 export async function getLlmUsage(): Promise<LLMUsageResponse> {
   const response = await fetch(`${API_BASE_URL}/api/llm/usage`, { headers: authHeaders() })
   await ensureOk(response, `Failed to load LLM usage: ${response.status}`)
   return response.json() as Promise<LLMUsageResponse>
+}
+
+// --- Recent activity (tool calls + LLM calls, merged) ---------------------------------
+
+export async function getActivity(limit = 50): Promise<ActivityResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/activity?limit=${limit}`, {
+    headers: authHeaders(),
+  })
+  await ensureOk(response, `Failed to load recent activity: ${response.status}`)
+  return response.json() as Promise<ActivityResponse>
+}
+
+// --- Discord bot control (web dashboard follow-up to file 13) -------------------------
+//
+// Wraps `app.api.routes.discord`'s thin control surface over `DiscordBotManager`
+// (backend/app/platforms/discord.py) -- replaces having to run
+// scripts/start-discord-bot.ps1 locally just to get the bot online/offline; these hit
+// whatever backend is already running (local dev or the deployed Render instance).
+
+export async function getDiscordStatus(): Promise<DiscordStatus> {
+  const response = await fetch(`${API_BASE_URL}/api/discord/status`, { headers: authHeaders() })
+  await ensureOk(response, `Failed to load Discord bot status: ${response.status}`)
+  return response.json() as Promise<DiscordStatus>
+}
+
+export async function startDiscordBot(): Promise<DiscordStatus> {
+  const response = await fetch(`${API_BASE_URL}/api/discord/start`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  await ensureOk(response, `Failed to start the Discord bot: ${response.status}`)
+  return response.json() as Promise<DiscordStatus>
+}
+
+export async function stopDiscordBot(): Promise<DiscordStatus> {
+  const response = await fetch(`${API_BASE_URL}/api/discord/stop`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  await ensureOk(response, `Failed to stop the Discord bot: ${response.status}`)
+  return response.json() as Promise<DiscordStatus>
+}
+
+// --- System diagnostics (Status tab's "Run system test" button) -----------------------
+//
+// Wraps `app.api.routes.diagnostics`'s read-only self-test battery
+// (backend/app/diagnostics/service.py) -- one click to see which component (database,
+// an LLM provider, voice, Discord, ...) is actually broken instead of guessing from
+// backend logs.
+
+export async function getDiagnosticChecks(): Promise<DiagnosticCheck[]> {
+  const response = await fetch(`${API_BASE_URL}/api/diagnostics/checks`, { headers: authHeaders() })
+  await ensureOk(response, `Failed to load diagnostic checks: ${response.status}`)
+  return response.json() as Promise<DiagnosticCheck[]>
+}
+
+/** `checks` omitted (or `undefined`) runs every component; a specific list narrows the
+ * run down to just those (e.g. re-testing just Ollama after restarting it). */
+export async function runDiagnostics(checks?: string[]): Promise<DiagnosticsRunResult> {
+  const response = await fetch(`${API_BASE_URL}/api/diagnostics/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ checks: checks ?? null }),
+  })
+  await ensureOk(response, `Failed to run diagnostics: ${response.status}`)
+  return response.json() as Promise<DiagnosticsRunResult>
 }
 
 // --- Memory / settings (§37 Phase 8, file 09 prompt 3) --------------------------------

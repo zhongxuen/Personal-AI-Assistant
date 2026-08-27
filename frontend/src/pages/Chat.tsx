@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react'
+import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Bot, Send, User } from 'lucide-react'
@@ -6,6 +6,7 @@ import { sendChatMessage } from '../services/api'
 import type { AssistantToolCallResult } from '../types/assistant'
 import { Button, Input } from '../components/ui'
 import { cn } from '../components/ui/utils'
+import { usePersistentState } from '../hooks/usePersistentState'
 
 interface ChatMessage {
   role: 'user' | 'assistant'
@@ -33,11 +34,18 @@ function isCapabilityRejection(call: AssistantToolCallResult): boolean {
  * sending the message and rendering whatever AssistantCore actually returns.
  */
 export function ChatPage() {
-  const [messages, setMessages] = useState<ChatMessage[]>([])
+  // Persisted (§ user report) so refreshing the page -- or Chrome discarding this tab
+  // in the background -- doesn't wipe the conversation. `conversationId` is persisted
+  // alongside the messages rather than regenerated per mount so a resumed session
+  // keeps talking to the same backend conversation instead of silently starting a new
+  // one the next message goes to.
+  const [messages, setMessages] = usePersistentState<ChatMessage[]>('jarvis:chat:messages', [])
+  const [conversationId] = usePersistentState<string>('jarvis:chat:conversationId', () =>
+    crypto.randomUUID(),
+  )
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const conversationId = useRef<string>(crypto.randomUUID())
 
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
@@ -50,7 +58,7 @@ export function ChatPage() {
     setError(null)
 
     try {
-      const response = await sendChatMessage(text, conversationId.current)
+      const response = await sendChatMessage(text, conversationId)
       setMessages((prev) => [
         ...prev,
         {

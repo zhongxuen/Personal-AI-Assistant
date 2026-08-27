@@ -15,7 +15,8 @@ docs/security.md):
     on the same machine as this backend, same as before this file existed, per this
     task's own instruction to keep that boundary separate rather than fold it into
     the new auth layer.
-  - every other `platform` (web, discord, ...) -- gated by `get_optional_current_user`:
+  - every other `platform` (web, discord, mobile, ...) -- gated by
+    `get_optional_current_user`:
     a valid bearer token is required, and the request's `user_id` is overwritten with
     the authenticated user's own identity rather than trusting whatever the client put
     in the request body (a caller must not be able to claim to be a different user
@@ -68,6 +69,13 @@ def post_message(
     # token already rejected with 401) by `get_optional_current_user` above -- None
     # here means specifically "no token was supplied at all", which is only a 401 for
     # this platform branch, not for platform="desktop".
+    #
+    # This is an inequality check against "desktop", not membership in an allowlist
+    # of known platforms -- `AssistantRequest.platform` (app/core/models.py) is a
+    # plain `str`, so a not-yet-formalized platform like "mobile" already falls into
+    # this branch today with zero route changes: it gets the loopback check skipped
+    # (`enforce_desktop_local_only` is equally a `!= "desktop"` no-op) and lands here
+    # requiring a bearer token, same as web/discord.
     if request.platform != "desktop":
         if current_user is None:
             raise HTTPException(

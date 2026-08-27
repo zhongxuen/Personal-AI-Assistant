@@ -7,12 +7,14 @@ against the real, fully-registered tool set (`register_default_tools`), and asse
 
   1. `AssistantResponse.used_llm` is `False` for every one of them (CommandRouter
      resolved them deterministically; classification LLM_REQUIRED was never hit), and
-  2. no network call was ever attempted -- `httpx`/`requests` are monkeypatched to raise
-     if called at all (including `httpx.AsyncClient.send`, the path Gemini's async SDK
-     actually uses -- see file 05), so any accidental LLM/network call would be caught.
-     A message classified LLM_REQUIRED now does call GeminiProvider for real (file 05); these tests only cover
-     commands that resolve deterministically, so GeminiProvider.generate is never
-     reached and this block never fires for them.
+  2. no network call was ever attempted -- `httpx`, `aiohttp` and `requests` are all
+     monkeypatched to raise if called at all, so any accidental LLM/network call would
+     be caught. A message classified LLM_REQUIRED does call the provider chain for real
+     (file 06's AIRouter); these tests only cover commands that resolve
+     deterministically, so no provider is ever reached and this block never fires for
+     them. `test_unrecognized_message_actually_reaches_the_llm_but_never_the_network`
+     is the deliberate contrast case, and doubles as the canary proving this guard
+     still works -- see its docstring.
 
 OS-level side effects (launching VS Code/Chrome, the routine's app-open steps) are
 mocked out the same way tests/tools/test_deterministic_tools.py does -- nothing actually
@@ -23,9 +25,11 @@ from __future__ import annotations
 
 from unittest.mock import Mock
 
+import aiohttp
 import httpx
 import pytest
 
+from app.config.settings import Settings
 from app.core.assistant import AssistantCore
 from app.core.models import AssistantRequest, AssistantResponse
 from app.tools import applications as applications_module
@@ -38,26 +42,46 @@ except ImportError:  # pragma: no cover - not installed in this project (see req
     requests = None
 
 
+class NetworkBlocked(BaseException):
+    """Deliberately a `BaseException`, not an `Exception`.
+
+    Every provider wraps its transport call in a broad `except Exception` and retries
+    with backoff (see `GeminiProvider._generate`'s `except Exception as exc` arm). An
+    `AssertionError` raised by this guard is an `Exception`, so it used to be *caught
+    and swallowed* there -- the guard fired, the provider logged it as an
+    "unexpected_error", slept through its retry backoff, and the test saw a tidy
+    RETRYABLE_ERROR instead of a failure. Inheriting from `BaseException` means the
+    signal propagates straight out through those handlers, which is the whole point of
+    a guard.
+    """
+
+
 def _blocked(*_args, **_kwargs):
-    raise AssertionError("Network call attempted during a zero-LLM command -- see §38/§9.")
+    raise NetworkBlocked("Network call attempted during a zero-LLM command -- see §38/§9.")
 
 
 async def _blocked_async(*_args, **_kwargs):
-    raise AssertionError("Network call attempted during a zero-LLM command -- see §38/§9.")
+    raise NetworkBlocked("Network call attempted during a zero-LLM command -- see §38/§9.")
 
 
 @pytest.fixture()
 def no_network(monkeypatch):
-    """Any attempted `httpx`/`requests` call fails the test immediately instead of
-    silently succeeding or hanging -- see module docstring.
+    """Any attempted `httpx`/`aiohttp`/`requests` call fails the test immediately
+    instead of silently succeeding or hanging -- see module docstring.
     """
     monkeypatch.setattr(httpx.Client, "send", _blocked)
     monkeypatch.setattr(httpx, "get", _blocked)
     monkeypatch.setattr(httpx, "post", _blocked)
-    # google-genai's async SDK (used by GeminiProvider.generate, file 05) sends
-    # through httpx.AsyncClient, not httpx.Client -- without this, a real request
-    # slips out whenever GEMINI_API_KEY happens to be set in the environment.
+    # OllamaProvider sends through httpx.AsyncClient (app/llm/ollama.py).
     monkeypatch.setattr(httpx.AsyncClient, "send", _blocked_async)
+    # google-genai prefers aiohttp over httpx for async requests whenever aiohttp is
+    # installed (`_api_client.py`'s `_use_aiohttp()`), which it is here -- so patching
+    # only httpx left GeminiProvider.generate a wide-open hole, and real Gemini calls
+    # were escaping this fixture whenever GEMINI_API_KEY was set in the environment.
+    # `_request` is the single coroutine every aiohttp verb funnels through, and
+    # google-genai's own `AiohttpClientSession` subclass overrides only `__del__`, so
+    # patching the base class covers it too.
+    monkeypatch.setattr(aiohttp.ClientSession, "_request", _blocked_async)
     if requests is not None:  # pragma: no cover - exercised only if requests is installed
         monkeypatch.setattr(requests.sessions.Session, "request", _blocked)
         monkeypatch.setattr(requests, "get", _blocked)
@@ -165,10 +189,35 @@ def test_run_routine_is_zero_llm(no_network, core):
     assert response.tool_calls[0]["result"]["data"]["routine"] == "coding"
 
 
-def test_unrecognized_message_needs_llm_but_still_makes_no_network_call(no_network, core):
-    # The one message in this file that *doesn't* resolve deterministically -- proves
-    # classification LLM_REQUIRED falls through to the placeholder response rather than an actual call,
-    # since no AI Router exists yet (file 06).
-    response = _handle(core, "what's the weather like tomorrow?")
+def test_unrecognized_message_actually_reaches_the_llm_but_never_the_network(
+    no_network, core, monkeypatch
+):
+    """The one message in this file that *doesn't* resolve deterministically.
 
-    assert response.used_llm is False
+    This used to assert `used_llm is False`, on the since-obsolete premise that "no AI
+    Router exists yet (file 06)" so an LLM_REQUIRED classification fell through to a
+    placeholder. File 06 built that router, so the premise died and the assertion went
+    stale -- and because `no_network` wasn't covering aiohttp (the transport
+    google-genai actually uses), the test was making a *real, billed* Gemini call on
+    any machine with GEMINI_API_KEY set, then failing on the response it got back.
+
+    What's worth asserting now is the contrast this test was always really about: every
+    other test in this file resolves with zero LLM involvement, and this one does not
+    -- an unrecognized message is classified LLM_REQUIRED and goes out to the provider
+    chain for real. Asserting that via the guard (rather than by mocking the provider)
+    also makes this the canary for `no_network` itself: if the SDK changes transports
+    again, this test starts failing with "DID NOT RAISE" instead of quietly letting
+    real calls leak out of the whole file, which is exactly how the aiohttp gap went
+    unnoticed.
+
+    Gemini is pinned on with a dummy key and Ollama disabled so the chain is the same
+    single, deterministic provider whether or not the machine running this has any real
+    credentials configured -- no test should depend on ambient API keys.
+    """
+    monkeypatch.setattr(
+        "app.llm.provider_manager.get_settings",
+        lambda: Settings(_env_file=None, gemini_api_key="test-api-key", ollama_enabled=False),
+    )
+
+    with pytest.raises(NetworkBlocked):
+        _handle(core, "what's the weather like tomorrow?")

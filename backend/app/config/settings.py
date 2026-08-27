@@ -141,9 +141,9 @@ class Settings(BaseSettings):
 
     # Discord adapter (§37 Phase 12, file 13). Backend-only secret -- never sent to
     # any frontend, never committed as a real value (see .env.example). Unset ->
-    # `run_discord_bot()` logs and no-ops rather than trying to connect, so a dev
-    # machine without a Discord app configured is unaffected (same "absence is a
-    # valid, non-crashing state" convention as gemini_api_key above).
+    # `DiscordBotManager.start()` (app/platforms/discord.py) no-ops rather than trying
+    # to connect, so a dev machine without a Discord app configured is unaffected (same
+    # "absence is a valid, non-crashing state" convention as gemini_api_key above).
     discord_bot_token: str | None = None
 
     @property

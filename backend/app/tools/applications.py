@@ -118,14 +118,33 @@ def _known_apps() -> str:
 
 
 class OpenApplicationTool:
-    """Launches a desktop application resolved from the "applications" memory category."""
+    """Launches a desktop application resolved from the "applications" memory category.
+
+    `target`, added for the Coding Routine template (`app/projects/discovery.py`'s
+    `list_projects()`, `frontend/src/components/CodingRoutinePanel.tsx`), is an
+    optional extra argument passed straight through to the launch -- a project folder
+    path for an editor alias (e.g. `code "<path>"`, opening VS Code directly on that
+    project instead of an empty window) or a URL for a browser alias (e.g. `chrome
+    "<url>"`). Deliberately generic rather than a project-specific `open_project`
+    tool/param: `open_application` already resolves any alias against memory, and
+    "pass one extra argument to the resolved command" covers both use cases (and any
+    future one) without special-casing "project" or "url" anywhere in this module.
+    Omitted (the default), behavior is unchanged from before `target` existed.
+    """
 
     name = "open_application"
     description = "Open/launch a desktop application by name (e.g. 'vscode', 'chrome')."
     parameters: dict[str, Any] = {
         "type": "object",
         "properties": {
-            "app_name": {"type": "string", "description": "Name or alias of the application to open."}
+            "app_name": {"type": "string", "description": "Name or alias of the application to open."},
+            "target": {
+                "type": "string",
+                "description": (
+                    "Optional extra argument passed to the app -- a folder path for an "
+                    "editor (opens it directly on that project) or a URL for a browser."
+                ),
+            },
         },
         "required": ["app_name"],
     }
@@ -133,7 +152,7 @@ class OpenApplicationTool:
     platforms = ["desktop"]
     requires_confirmation = False
 
-    def handler(self, app_name: str, **kwargs: Any) -> ToolResult:
+    def handler(self, app_name: str, target: str | None = None, **kwargs: Any) -> ToolResult:
         resolved = _resolve(app_name)
         if resolved is None:
             return ToolResult(
@@ -146,10 +165,16 @@ class OpenApplicationTool:
         try:
             if sys.platform == "win32":
                 # os.startfile resolves PATH/registered-app launches (e.g. "notepad",
-                # "calc") the same way the Windows "Run" dialog would.
-                os.startfile(command[0])  # noqa: S606 - command comes from our own memory-backed map
+                # "calc") the same way the Windows "Run" dialog would. `arguments` (str,
+                # Python 3.10+) is only passed when a `target` was given, so an unmocked
+                # call with no target is byte-for-byte identical to before `target`
+                # existed -- no behavior change for every existing caller/test.
+                if target:
+                    os.startfile(command[0], arguments=f'"{target}"')  # noqa: S606
+                else:
+                    os.startfile(command[0])  # noqa: S606 - command comes from our own memory-backed map
             else:
-                subprocess.Popen(command)
+                subprocess.Popen([*command, target] if target else command)
         except Exception as exc:
             return ToolResult(success=False, error=f"Failed to open '{app_name}': {exc}")
 

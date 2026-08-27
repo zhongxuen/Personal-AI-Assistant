@@ -2,8 +2,9 @@
 Shared fixtures (§37 Phase 2 / file 03, extended file 04 prompts 1 & 2, file 09 prompt 2).
 
 `app/tools/tasks.py`, `app/tools/routines.py`, `app/tools/applications.py`,
-`app/memory/service.py`, `app/memory/retrieval.py`, `app/tasks/scheduler.py`, and
-`app/routines/engine.py` each open their own short-lived DB session via a module-level
+`app/projects/discovery.py`, `app/memory/service.py`, `app/memory/retrieval.py`,
+`app/tasks/scheduler.py`, and `app/routines/engine.py` each open their own short-lived
+DB session via a module-level
 `SessionLocal` imported directly from `app.database.database` -- there's no dependency
 injection to swap a session in. `test_db` monkeypatches those module-level references
 to a throwaway in-memory SQLite database (shared across the whole fixture via
@@ -43,6 +44,7 @@ def test_db(monkeypatch):
     monkeypatch.setattr("app.tools.tasks.SessionLocal", TestSessionLocal)
     monkeypatch.setattr("app.tools.routines.SessionLocal", TestSessionLocal)
     monkeypatch.setattr("app.tools.applications.SessionLocal", TestSessionLocal)
+    monkeypatch.setattr("app.projects.discovery.SessionLocal", TestSessionLocal)
     monkeypatch.setattr("app.tasks.scheduler.SessionLocal", TestSessionLocal)
     monkeypatch.setattr("app.routines.engine.SessionLocal", TestSessionLocal)
     monkeypatch.setattr("app.memory.service.SessionLocal", TestSessionLocal)

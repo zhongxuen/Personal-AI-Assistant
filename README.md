@@ -55,6 +55,12 @@ The Discord bot isn't a separate process — it starts automatically inside the 
 one-shot script that activates the venv, checks `DISCORD_BOT_TOKEN` is set, and boots
 the backend (pass `-Reload` for the `--reload` dev flow).
 
+Once the backend is running (locally or deployed), the web dashboard's **Settings**
+tab has a "Discord bot" panel showing live connection status with Start/Stop controls
+(`GET/POST /api/discord/status|start|stop`, backed by `DiscordBotManager` in
+`backend/app/platforms/discord.py`) — so toggling the bot on/off no longer requires
+restarting the backend process at all, just a configured `DISCORD_BOT_TOKEN`.
+
 **Frontend** (from `frontend/`):
 
 ```bash

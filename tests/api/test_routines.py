@@ -189,6 +189,51 @@ def test_set_enabled_unknown_routine_404(client):
     assert client.patch("/api/routines/nope", json={"enabled": False}).status_code == 404
 
 
+def test_rename_routine(client):
+    client.post(
+        "/api/routines",
+        json={"name": "demo", "steps": [{"tool_name": "stub_first", "params": {"a": 1}}]},
+    )
+
+    response = client.patch("/api/routines/demo", json={"name": "demo-renamed"})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "demo-renamed"
+    assert body["steps"] == [{"tool_name": "stub_first", "params": {"a": 1}}]
+
+    assert client.get("/api/routines/demo").status_code == 404
+    assert client.get("/api/routines/demo-renamed").status_code == 200
+
+
+def test_rename_and_set_enabled_together(client):
+    client.post("/api/routines", json={"name": "demo", "steps": []})
+
+    response = client.patch("/api/routines/demo", json={"name": "demo-renamed", "enabled": False})
+    assert response.status_code == 200
+    body = response.json()
+    assert body["name"] == "demo-renamed"
+    assert body["enabled"] is False
+
+
+def test_rename_routine_duplicate_name_rejected(client):
+    client.post("/api/routines", json={"name": "demo", "steps": []})
+    client.post("/api/routines", json={"name": "taken", "steps": []})
+
+    response = client.patch("/api/routines/demo", json={"name": "taken"})
+    assert response.status_code == 422
+
+
+def test_rename_routine_blank_name_rejected(client):
+    client.post("/api/routines", json={"name": "demo", "steps": []})
+
+    response = client.patch("/api/routines/demo", json={"name": "  "})
+    assert response.status_code == 422
+
+
+def test_rename_unknown_routine_404(client):
+    assert client.patch("/api/routines/nope", json={"name": "still-nope"}).status_code == 404
+
+
 def test_delete_routine(client):
     client.post("/api/routines", json={"name": "demo", "steps": []})
     assert client.delete("/api/routines/demo").status_code == 204

@@ -94,6 +94,28 @@ class RoutineRegistry:
         self.db.refresh(routine)
         return self._to_data(routine)
 
+    def rename_routine(self, name: str, new_name: str) -> RoutineData | None:
+        """Rename a routine without touching its steps/enabled flag. Returns `None` if
+        no routine has `name`. Raises `ValueError` for a blank `new_name` or one
+        already taken by a different routine -- same uniqueness rule `create_routine`
+        enforces, since routine names are still how `run_routine`/`RoutineScheduler`
+        look routines up.
+        """
+        new_name = new_name.strip()
+        if not new_name:
+            raise ValueError("A routine needs a non-empty name.")
+        routine = self.db.query(Routine).filter(Routine.name == name).one_or_none()
+        if routine is None:
+            return None
+        if new_name != routine.name:
+            clash = self.db.query(Routine).filter(Routine.name == new_name).one_or_none()
+            if clash is not None:
+                raise ValueError(f"A routine named '{new_name}' already exists.")
+            routine.name = new_name
+            self.db.commit()
+            self.db.refresh(routine)
+        return self._to_data(routine)
+
     def set_enabled(self, name: str, enabled: bool) -> RoutineData | None:
         """Flip a routine's `enabled` flag without touching its steps -- the "Stop"/
         "Start" toggle on the Routine Dashboard. A disabled routine is left fully
