@@ -1,0 +1,24 @@
+name: Keep backend warm
+
+# Render's free web-service tier spins down after ~15 min of no traffic, causing
+# "Failed to fetch" on the deployed Vercel frontend's first login attempt afterwards
+# (see docs/deployment.md's "Known limitations" section). This pings the backend's
+# health endpoint often enough that Render never sees 15 idle minutes and never sleeps.
+#
+# Not a guarantee: GitHub's scheduled workflows can be delayed under high load (GitHub
+# itself warns cron jobs may not fire exactly on time, especially at the top of the
+# hour), and this doesn't change Render's free-tier monthly hour cap. If cold starts
+# still happen occasionally, see docs/deployment.md for the paid-plan alternative.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hit backend health endpoint
+        run: |
+          curl -fsS --max-time 60 https://jarvis-api-hi10.onrender.com/api/health

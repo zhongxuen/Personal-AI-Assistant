@@ -51,6 +51,10 @@ _NAME_PREFIX_RE = re.compile(r"^\s*jarvis\s*[,:]?\s*", re.IGNORECASE)
 # Discord's hard per-message character cap.
 _DISCORD_MESSAGE_LIMIT = 2000
 
+# Presence text shown under the bot's name in Discord's member list -- purely
+# cosmetic (§ branding), no bearing on message handling above.
+_PRESENCE_ACTIVITY = discord.Activity(type=discord.ActivityType.listening, name='"Jarvis, ..."')
+
 
 class DiscordMessage(Protocol):
     """The subset of `discord.Message` this adapter actually reads -- lets tests pass
@@ -111,6 +115,7 @@ def build_discord_client() -> discord.Client:
     @client.event
     async def on_ready() -> None:
         logger.info("Discord bot connected as %s", client.user)
+        await client.change_presence(activity=_PRESENCE_ACTIVITY)
 
     @client.event
     async def on_message(message: discord.Message) -> None:

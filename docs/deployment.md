@@ -166,8 +166,14 @@ a stuck login (wrong `AUTH_SEED_*` values, or `VITE_API_BASE_URL` pointed at the
 
 - **Free instance spin-down** — Render's free web service spins down after periods of
   inactivity; the first request after an idle period can take 50+ seconds while it cold-starts
-  (Render's own dashboard surfaces this warning on the service). Not a bug — the alternative on
-  the free tier is paying for an always-on instance.
+  (Render's own dashboard surfaces this warning on the service), and login from the Vercel
+  frontend can fail outright with "Failed to fetch" if the request lands mid-spin-up rather than
+  waiting it out. Not a bug — the alternative on the free tier is paying for an always-on
+  instance. `.github/workflows/keep-backend-warm.yml` pings `/api/health` every 10 minutes so the
+  service never sees 15 idle minutes and (in practice) never spins down — a free workaround, not
+  a guarantee (GitHub Actions cron can occasionally run late, and this still counts against
+  Render's free-tier monthly hour cap). If cold starts still happen, upgrade `jarvis-api` to a
+  paid Render plan instead of relying on the ping.
 - **SQLite persistence** — Render's free web-service plan has no persistent disk; `jarvis.db`
   lives on the container's ephemeral filesystem and is wiped on every redeploy and on the
   periodic restart free instances get after idling. Fine for demoing the deployed dashboards;

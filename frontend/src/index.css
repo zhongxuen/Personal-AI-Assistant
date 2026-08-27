@@ -1,1 +1,159 @@
 @import "tailwindcss";
+
+/*
+ * Cyberpunk HUD design tokens (md-files/ui-development.md Section 2).
+ * Foundation only -- no component/page styling here yet.
+ */
+@theme {
+  /* --- Color tokens --- */
+
+  /* Base surfaces: near-black background, layered glass panels one/two steps up. */
+  --color-bg: #05070d;
+  --color-surface: #0d1220;
+  --color-surface-2: #131a2e;
+
+  /* Neon accents. */
+  --color-primary: #22d3ee; /* electric cyan -- primary actions, active nav, links, focus rings */
+  --color-secondary: #a78bfa; /* violet -- secondary accents, gradient pairing with primary */
+
+  /* Status colors -- kept semantically distinct from the neon accents so meaning survives
+   * the re-theme (see mapping table below). */
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+
+  /* Text & borders. */
+  --color-text: #e2e8f0;
+  --color-text-muted: #94a3b8;
+  --color-border: #1e293b;
+
+  /* --- Typography --- */
+
+  /* Geometric/technical display font for headings, loaded via <link> in index.html.
+   * Body text keeps Tailwind's default system sans stack; numeric/status data uses the
+   * system monospace stack for a HUD feel without an extra font fetch. */
+  --font-display: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, "Space Mono", Menlo, Consolas, monospace;
+
+  /* Type scale: H1-H3, body, label. */
+  --text-h1: 2.25rem;
+  --text-h1--line-height: 2.5rem;
+  --text-h2: 1.5rem;
+  --text-h2--line-height: 2rem;
+  --text-h3: 1.25rem;
+  --text-h3--line-height: 1.75rem;
+  --text-body: 1rem;
+  --text-body--line-height: 1.5rem;
+  --text-label: 0.75rem;
+  --text-label--line-height: 1rem;
+
+  /* --- Motion --- */
+
+  /* Neon glow shadows for hover/focus states (box-shadow, not filter, per perf guidance). */
+  --shadow-glow-primary: 0 0 12px 1px color-mix(in srgb, var(--color-primary) 60%, transparent);
+  --shadow-glow-secondary: 0 0 12px 1px color-mix(in srgb, var(--color-secondary) 60%, transparent);
+
+  /* Shimmer sweep for ui/Skeleton.tsx loading placeholders. */
+  --animate-shimmer: shimmer 2s linear infinite;
+
+  /* Glow-pulse for quota bars that have crossed into WARNING/CRITICAL
+   * (md-files/ui-development.md §5) -- box-shadow, not filter, per the perf guidance
+   * in §2. Color comes from `currentColor` so ui/ProgressBar.tsx can drive it per-tone
+   * with a plain `text-{tone}` class instead of one keyframe per tone. */
+  --animate-glow-pulse: glow-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes glow-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 55%, transparent);
+  }
+  50% {
+    box-shadow: 0 0 10px 2px color-mix(in srgb, currentColor 55%, transparent);
+  }
+}
+
+/*
+ * Status-color mapping table (old Tailwind utility class -> new token).
+ * Covers every color used today in ProviderStatus.tsx BADGE_STYLES and LimitBar.tsx
+ * FILL_STYLES, so status semantics survive the re-theme intact:
+ *
+ *   NORMAL   border-emerald-800 bg-emerald-950/40 text-emerald-300 | bg-emerald-500
+ *            -> --color-success
+ *   WARNING  border-amber-800   bg-amber-950/40   text-amber-300  | bg-amber-500
+ *            -> --color-warning
+ *   CRITICAL border-red-800     bg-red-950/40     text-red-300    | bg-red-500
+ *            -> --color-danger
+ *   FAILOVER border-purple-800  bg-purple-950/40  text-purple-300 | bg-purple-500
+ *            -> --color-secondary
+ *
+ *   (fallback) border-slate-700 bg-slate-800/60 text-slate-300    -> --color-border /
+ *              --color-surface-2 / --color-text-muted
+ *   unmetered  bg-slate-600                                       -> --color-text-muted
+ *
+ * General neutral mapping used elsewhere on the pages:
+ *   bg-slate-950/900          -> --color-bg
+ *   bg-slate-900              -> --color-surface
+ *   bg-slate-800              -> --color-surface-2
+ *   border-slate-800/700      -> --color-border
+ *   text-slate-100            -> --color-text
+ *   text-slate-400/500        -> --color-text-muted
+ *   emerald-600/500 (buttons) -> --color-primary (was standing in for "primary action";
+ *                                 the new theme has a dedicated primary accent, so emerald
+ *                                 is freed up to mean "success" only, per the table above)
+ */
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-bg);
+    color: var(--color-text);
+    font-family: var(--font-sans);
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+
+  /* Baseline keyboard-focus glow (md-files/ui-development.md §7 milestone 6): Input,
+   * Select, TextArea, and the VoiceControl transcript box already pair
+   * `focus:outline-none` with their own `focus:border-primary focus:shadow-glow-primary`
+   * -- those Tailwind utility rules are more specific than this bare `:focus-visible`
+   * selector and keep taking priority. This fallback exists for every other
+   * interactive element (Button, SidebarItem, Modal/Toast dismiss buttons, plain
+   * `<button>`/`<a>` on the pages) that never defined its own focus treatment and was
+   * otherwise falling back to the browser's plain outline. `:focus-visible` (not
+   * `:focus`) so mouse/touch activation doesn't light up the ring, only keyboard nav. */
+  :focus-visible {
+    outline: none;
+    box-shadow:
+      0 0 0 2px var(--color-bg),
+      0 0 0 4px var(--color-primary),
+      var(--shadow-glow-primary);
+  }
+}

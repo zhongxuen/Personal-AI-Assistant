@@ -2,6 +2,7 @@ import { useState } from 'react'
 import type { FormEvent } from 'react'
 import { useMemorySettings } from '../hooks/useMemorySettings'
 import type { ApplicationMapping } from '../types/memory'
+import { Button, ConfirmDialog, Input, Panel, Skeleton, StaggerItem, StaggerList, useToast } from '../components/ui'
 
 /** An application mapping mid-edit: command/process_names are kept as raw
  * comma-separated text so the inputs don't fight the user while typing, and parsed
@@ -45,6 +46,7 @@ export function SettingsPage() {
     removeApplication,
     saveDefaultProject,
   } = useMemorySettings()
+  const { show } = useToast()
 
   const [editingAlias, setEditingAlias] = useState<string | null>(null)
   const [editValue, setEditValue] = useState<EditableMapping>(EMPTY_EDITABLE)
@@ -59,6 +61,10 @@ export function SettingsPage() {
   const [projectDraft, setProjectDraft] = useState<string | null>(null)
   const [projectError, setProjectError] = useState<string | null>(null)
   const [savingProject, setSavingProject] = useState(false)
+
+  // Toast-based confirmation replacing `window.confirm()` (§5).
+  const [pendingDeleteAlias, setPendingDeleteAlias] = useState<string | null>(null)
+  const [deletingAlias, setDeletingAlias] = useState(false)
 
   const aliases = Object.keys(applications).sort()
 
@@ -79,6 +85,8 @@ export function SettingsPage() {
     try {
       await saveApplication(alias, mapping)
       setEditingAlias(null)
+      // Inline save confirmation via toast instead of silent success (§5).
+      show(`Saved '${alias}'.`, 'success')
     } catch (err) {
       setEditError(err instanceof Error ? err.message : 'Failed to save mapping.')
     } finally {
@@ -86,10 +94,18 @@ export function SettingsPage() {
     }
   }
 
-  async function handleDelete(alias: string) {
-    if (!window.confirm(`Remove the '${alias}' application mapping?`)) return
-    await removeApplication(alias)
-    if (editingAlias === alias) setEditingAlias(null)
+  async function confirmDelete() {
+    if (!pendingDeleteAlias) return
+    const alias = pendingDeleteAlias
+    setDeletingAlias(true)
+    try {
+      await removeApplication(alias)
+      if (editingAlias === alias) setEditingAlias(null)
+      show(`Removed '${alias}'.`, 'success')
+    } finally {
+      setDeletingAlias(false)
+      setPendingDeleteAlias(null)
+    }
   }
 
   async function handleCreate(event: FormEvent) {
@@ -110,6 +126,7 @@ export function SettingsPage() {
       await saveApplication(alias, mapping)
       setNewAlias('')
       setNewValue(EMPTY_EDITABLE)
+      show(`Added '${alias}'.`, 'success')
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : 'Failed to create mapping.')
     } finally {
@@ -128,6 +145,7 @@ export function SettingsPage() {
     try {
       await saveDefaultProject(value)
       setProjectDraft(null)
+      show('Default project saved.', 'success')
     } catch (err) {
       setProjectError(err instanceof Error ? err.message : 'Failed to save default project.')
     } finally {
@@ -136,160 +154,176 @@ export function SettingsPage() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-950 px-6 py-10 text-slate-100">
+    <main className="px-6 py-10">
       <div className="mx-auto max-w-3xl">
-        <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="mt-1 text-sm text-slate-400">
-          Memory-backed application mappings and the "coding" routine's default project --
-          the same values <code className="text-slate-300">open_application</code> and{' '}
-          <code className="text-slate-300">run_routine</code> resolve against.
+        <p className="text-sm text-text-muted">
+          Memory-backed application mappings and the "coding" routine's default project -- the
+          same values <code className="text-text">open_application</code> and{' '}
+          <code className="text-text">run_routine</code> resolve against.
         </p>
 
-        {loading && <p className="mt-6 text-slate-400">Loading settings…</p>}
-        {error && <p className="mt-6 text-red-400">Failed to load settings: {error}</p>}
+        {/* Skeleton loaders (§5) instead of a blank page while settings fetch --
+            shaped like the default-project panel plus a couple of mapping cards. */}
+        {loading && (
+          <div className="mt-8 space-y-3">
+            <Panel className="p-4">
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="mt-3 h-9 w-56" />
+            </Panel>
+            {[0, 1].map((i) => (
+              <Panel key={i} className="p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <Skeleton className="h-4 w-24" />
+                  <Skeleton className="h-8 w-16" />
+                </div>
+              </Panel>
+            ))}
+          </div>
+        )}
+        {error && <p className="mt-6 text-danger">Failed to load settings: {error}</p>}
 
         {!loading && !error && (
           <>
-            <section className="mt-8 rounded-lg border border-slate-800 bg-slate-900 p-4">
-              <h2 className="text-sm font-semibold text-slate-200">Default project</h2>
-              <p className="mt-1 text-xs text-slate-500">
+            {/* Grouped panel layout (§5) -- one Panel per logical settings group. */}
+            <Panel className="mt-8 p-4">
+              <h2 className="font-display text-sm font-semibold text-text">Default project</h2>
+              <p className="mt-1 text-xs text-text-muted">
                 The application alias "Start coding" opens alongside your editor and browser.
               </p>
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                <input
-                  className="w-56 rounded border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100"
+                <Input
+                  className="w-56"
                   value={projectDraft ?? defaultProject}
                   onChange={(e) => setProjectDraft(e.target.value)}
                   placeholder="portfolio"
                 />
-                <button
+                <Button
                   onClick={handleSaveProject}
                   disabled={savingProject || (projectDraft ?? defaultProject) === defaultProject}
-                  className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+                  loading={savingProject}
                 >
-                  {savingProject ? 'Saving…' : 'Save'}
-                </button>
+                  Save
+                </Button>
               </div>
-              {projectError && <p className="mt-2 text-sm text-red-400">{projectError}</p>}
-            </section>
+              {projectError && <p className="mt-2 text-sm text-danger">{projectError}</p>}
+            </Panel>
 
             <section className="mt-6 space-y-3">
-              <h2 className="text-sm font-semibold text-slate-200">Application mappings</h2>
+              <h2 className="font-display text-sm font-semibold text-text">Application mappings</h2>
               {aliases.length === 0 && (
-                <p className="text-sm text-slate-400">No application mappings yet -- add one below.</p>
+                <p className="text-sm text-text-muted">No application mappings yet -- add one below.</p>
               )}
+              {/* Staggered fade/slide-in on load (§5). */}
+              <StaggerList className="space-y-3">
               {aliases.map((alias) => {
                 const mapping = applications[alias]
                 const isEditing = editingAlias === alias
                 return (
-                  <div key={alias} className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+                  <StaggerItem key={alias}>
+                  <Panel className="p-4">
                     <div className="flex flex-wrap items-center justify-between gap-3">
-                      <span className="font-medium">{alias}</span>
+                      <span className="font-medium text-text">{alias}</span>
                       <div className="flex gap-2">
                         {isEditing ? (
-                          <button
-                            onClick={() => setEditingAlias(null)}
-                            className="rounded border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:bg-slate-800"
-                          >
+                          <Button variant="ghost" onClick={() => setEditingAlias(null)}>
                             Cancel
-                          </button>
+                          </Button>
                         ) : (
-                          <button
-                            onClick={() => startEdit(alias)}
-                            className="rounded border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:bg-slate-800"
-                          >
+                          <Button variant="ghost" onClick={() => startEdit(alias)}>
                             Edit
-                          </button>
+                          </Button>
                         )}
-                        <button
-                          onClick={() => handleDelete(alias)}
-                          className="rounded border border-red-800 px-3 py-1 text-xs text-red-400 hover:bg-red-900/40"
-                        >
+                        <Button variant="destructive" onClick={() => setPendingDeleteAlias(alias)}>
                           Delete
-                        </button>
+                        </Button>
                       </div>
                     </div>
 
                     {isEditing ? (
-                      <div className="mt-3 space-y-2 border-t border-slate-800 pt-3">
-                        <label className="block text-xs text-slate-500">
+                      <div className="mt-3 space-y-2 border-t border-border pt-3">
+                        <label className="block text-xs text-text-muted">
                           Command (comma-separated)
-                          <input
-                            className="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-2 py-1 font-mono text-xs text-slate-100"
+                          <Input
+                            className="mt-1 w-full font-mono text-xs"
                             value={editValue.commandText}
                             onChange={(e) => setEditValue({ ...editValue, commandText: e.target.value })}
                           />
                         </label>
-                        <label className="block text-xs text-slate-500">
+                        <label className="block text-xs text-text-muted">
                           Process names (comma-separated)
-                          <input
-                            className="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-2 py-1 font-mono text-xs text-slate-100"
+                          <Input
+                            className="mt-1 w-full font-mono text-xs"
                             value={editValue.processNamesText}
                             onChange={(e) =>
                               setEditValue({ ...editValue, processNamesText: e.target.value })
                             }
                           />
                         </label>
-                        {editError && <p className="text-sm text-red-400">{editError}</p>}
-                        <button
-                          onClick={() => handleSaveEdit(alias)}
-                          disabled={saving}
-                          className="rounded bg-emerald-600 px-3 py-1 text-sm text-white hover:bg-emerald-500 disabled:opacity-50"
-                        >
-                          {saving ? 'Saving…' : 'Save'}
-                        </button>
+                        {editError && <p className="text-sm text-danger">{editError}</p>}
+                        <Button onClick={() => handleSaveEdit(alias)} disabled={saving} loading={saving}>
+                          Save
+                        </Button>
                       </div>
                     ) : (
-                      <p className="mt-2 text-xs text-slate-400">
-                        command: <span className="font-mono text-slate-300">{mapping.command.join(', ')}</span>
+                      <p className="mt-2 text-xs text-text-muted">
+                        command: <span className="font-mono text-text">{mapping.command.join(', ')}</span>
                         {mapping.process_names.length > 0 && (
                           <>
                             {' '}
                             · process names:{' '}
-                            <span className="font-mono text-slate-300">{mapping.process_names.join(', ')}</span>
+                            <span className="font-mono text-text">{mapping.process_names.join(', ')}</span>
                           </>
                         )}
                       </p>
                     )}
-                  </div>
+                  </Panel>
+                  </StaggerItem>
                 )
               })}
+              </StaggerList>
             </section>
 
-            <form onSubmit={handleCreate} className="mt-6 rounded-lg border border-slate-800 bg-slate-900 p-4">
-              <h2 className="text-sm font-semibold text-slate-200">New application mapping</h2>
-              <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                <input
-                  className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100"
-                  value={newAlias}
-                  onChange={(e) => setNewAlias(e.target.value)}
-                  placeholder="alias (e.g. slack)"
-                />
-                <input
-                  className="rounded border border-slate-700 bg-slate-800 px-2 py-1 font-mono text-xs text-slate-100"
-                  value={newValue.commandText}
-                  onChange={(e) => setNewValue({ ...newValue, commandText: e.target.value })}
-                  placeholder="command (comma-separated)"
-                />
-                <input
-                  className="rounded border border-slate-700 bg-slate-800 px-2 py-1 font-mono text-xs text-slate-100"
-                  value={newValue.processNamesText}
-                  onChange={(e) => setNewValue({ ...newValue, processNamesText: e.target.value })}
-                  placeholder="process names (comma-separated)"
-                />
-              </div>
-              {createError && <p className="mt-2 text-sm text-red-400">{createError}</p>}
-              <button
-                type="submit"
-                disabled={creating}
-                className="mt-3 rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-              >
-                {creating ? 'Creating…' : 'Add mapping'}
-              </button>
+            <form onSubmit={handleCreate}>
+              <Panel className="mt-6 p-4">
+                <h2 className="font-display text-sm font-semibold text-text">New application mapping</h2>
+                <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                  <Input
+                    value={newAlias}
+                    onChange={(e) => setNewAlias(e.target.value)}
+                    placeholder="alias (e.g. slack)"
+                  />
+                  <Input
+                    className="font-mono text-xs"
+                    value={newValue.commandText}
+                    onChange={(e) => setNewValue({ ...newValue, commandText: e.target.value })}
+                    placeholder="command (comma-separated)"
+                  />
+                  <Input
+                    className="font-mono text-xs"
+                    value={newValue.processNamesText}
+                    onChange={(e) => setNewValue({ ...newValue, processNamesText: e.target.value })}
+                    placeholder="process names (comma-separated)"
+                  />
+                </div>
+                {createError && <p className="mt-2 text-sm text-danger">{createError}</p>}
+                <Button type="submit" disabled={creating} loading={creating} className="mt-3">
+                  Add mapping
+                </Button>
+              </Panel>
             </form>
           </>
         )}
       </div>
+
+      <ConfirmDialog
+        open={pendingDeleteAlias !== null}
+        message={`Remove the '${pendingDeleteAlias}' application mapping?`}
+        confirmLabel="Delete"
+        confirmVariant="destructive"
+        loading={deletingAlias}
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDeleteAlias(null)}
+      />
     </main>
   )
 }

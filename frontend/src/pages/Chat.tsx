@@ -1,7 +1,11 @@
 import { useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { AnimatePresence, motion } from 'framer-motion'
+import { Bot, Send, User } from 'lucide-react'
 import { sendChatMessage } from '../services/api'
 import type { AssistantToolCallResult } from '../types/assistant'
+import { Button, Input } from '../components/ui'
+import { cn } from '../components/ui/utils'
 
 interface ChatMessage {
   role: 'user' | 'assistant'
@@ -65,67 +69,119 @@ export function ChatPage() {
   }
 
   return (
-    <main className="flex min-h-screen flex-col bg-slate-950 px-6 py-10 text-slate-100">
-      <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col">
-        <h1 className="text-2xl font-semibold">Chat</h1>
-        <p className="mt-1 text-sm text-slate-400">
+    <main className="flex h-full flex-col px-6 py-6">
+      <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col overflow-hidden">
+        <p className="text-sm text-text-muted">
           Talk to Jarvis over the web -- same assistant, same tools, minus anything that needs
           this machine.
         </p>
 
-        <div className="mt-6 flex-1 space-y-3 overflow-y-auto">
-          {messages.length === 0 && (
-            <p className="text-sm text-slate-500">Say something to get started.</p>
+        <div className="mt-6 flex-1 space-y-3 overflow-y-auto pr-1">
+          {messages.length === 0 && !sending && (
+            <p className="text-sm text-text-muted">Say something to get started.</p>
           )}
-          {messages.map((message, index) => (
-            <div
-              key={index}
-              className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
-                message.role === 'user'
-                  ? 'ml-auto bg-slate-800 text-slate-100'
-                  : 'bg-slate-900 text-slate-200'
-              }`}
-            >
-              {message.role === 'assistant' && (
-                <p className="mb-1 text-xs uppercase tracking-wide text-slate-500">
-                  {message.usedLlm ? `Reasoned (${message.provider ?? 'LLM'})` : 'Direct command'}
-                </p>
-              )}
-              <p className="whitespace-pre-wrap">{message.text}</p>
-              {message.toolCalls?.map((call, callIndex) => (
-                <p
-                  key={callIndex}
-                  className={`mt-1 font-mono text-xs ${
-                    isCapabilityRejection(call)
-                      ? 'text-amber-400'
-                      : call.result.success
-                        ? 'text-emerald-400'
-                        : 'text-red-400'
-                  }`}
+
+          {/* Staggered fade/slide-in entrance per md-files/ui-development.md §5;
+              `initial={false}` on the group keeps messages already on screen from
+              re-animating on unrelated re-renders (e.g. the typing indicator toggling). */}
+          <AnimatePresence initial={false}>
+            {messages.map((message, index) => (
+              <motion.div
+                key={index}
+                initial={{ opacity: 0, y: 10, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                transition={{ duration: 0.25, ease: 'easeOut' }}
+                className={cn(
+                  'flex max-w-[85%] items-start gap-2',
+                  message.role === 'user' && 'ml-auto flex-row-reverse',
+                )}
+              >
+                <div
+                  className={cn(
+                    'flex h-7 w-7 shrink-0 items-center justify-center rounded-full border',
+                    message.role === 'user'
+                      ? 'border-secondary/50 bg-secondary/10 text-secondary'
+                      : 'border-primary/50 bg-primary/10 text-primary',
+                  )}
                 >
-                  {call.tool_name}: {call.result.success ? 'ok' : call.result.error}
-                </p>
-              ))}
-            </div>
-          ))}
+                  {message.role === 'user' ? (
+                    <User className="h-3.5 w-3.5" />
+                  ) : (
+                    <Bot className="h-3.5 w-3.5" />
+                  )}
+                </div>
+                {/* Gradient-accented bubbles distinguish user (violet) from assistant
+                    (cyan) per §5, replacing the old flat slate-800/900 fill. */}
+                <div
+                  className={cn(
+                    'min-w-0 rounded-lg border px-3 py-2 text-sm text-text backdrop-blur-md',
+                    message.role === 'user'
+                      ? 'border-secondary/30 bg-gradient-to-br from-secondary/15 to-secondary/5'
+                      : 'border-primary/30 bg-gradient-to-br from-primary/15 to-primary/5',
+                  )}
+                >
+                  {message.role === 'assistant' && (
+                    <p className="mb-1 font-mono text-xs uppercase tracking-wide text-text-muted">
+                      {message.usedLlm ? `Reasoned (${message.provider ?? 'LLM'})` : 'Direct command'}
+                    </p>
+                  )}
+                  <p className="whitespace-pre-wrap">{message.text}</p>
+                  {message.toolCalls?.map((call, callIndex) => (
+                    <p
+                      key={callIndex}
+                      className={cn(
+                        'mt-1 font-mono text-xs',
+                        isCapabilityRejection(call)
+                          ? 'text-warning'
+                          : call.result.success
+                            ? 'text-success'
+                            : 'text-danger',
+                      )}
+                    >
+                      {call.tool_name}: {call.result.success ? 'ok' : call.result.error}
+                    </p>
+                  ))}
+                </div>
+              </motion.div>
+            ))}
+
+            {/* Typing/thinking indicator (§5) while awaiting the assistant's reply --
+                three bouncing dots in a bubble shaped like an assistant message. */}
+            {sending && (
+              <motion.div
+                key="typing-indicator"
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.2 }}
+                className="flex max-w-[85%] items-center gap-2"
+              >
+                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-primary/50 bg-primary/10 text-primary">
+                  <Bot className="h-3.5 w-3.5" />
+                </div>
+                <div className="flex items-center gap-1 rounded-lg border border-primary/30 bg-gradient-to-br from-primary/15 to-primary/5 px-3 py-2.5 backdrop-blur-md">
+                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
+                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
+                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary" />
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </div>
 
-        {error && <p className="mt-3 text-sm text-red-400">{error}</p>}
+        {error && <p className="mt-3 text-sm text-danger">{error}</p>}
 
         <form onSubmit={handleSubmit} className="mt-4 flex gap-2">
-          <input
+          <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Message Jarvis…"
-            className="flex-1 rounded border border-slate-700 bg-slate-900 px-3 py-2 text-sm text-slate-100 focus:border-slate-500 focus:outline-none"
+            className="flex-1"
           />
-          <button
-            type="submit"
-            disabled={sending || !input.trim()}
-            className="rounded bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-          >
-            {sending ? 'Sending…' : 'Send'}
-          </button>
+          <Button type="submit" disabled={sending || !input.trim()} loading={sending}>
+            <Send className="h-4 w-4" />
+            Send
+          </Button>
         </form>
       </div>
     </main>
