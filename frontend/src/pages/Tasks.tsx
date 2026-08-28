@@ -178,11 +178,11 @@ export function TasksPage() {
   }
 
   return (
-    <main className="px-6 py-10">
+    <main className="px-4 pb-28 pt-6 sm:px-6 sm:pb-10 sm:pt-10">
       <div className="mx-auto max-w-4xl">
         <p className="text-sm text-text-muted">Create, filter, and manage tasks.</p>
 
-        <Panel className="mt-6 flex flex-wrap items-end gap-3 p-4">
+        <Panel className="mt-6 grid grid-cols-1 gap-3 p-4 sm:flex sm:flex-wrap sm:items-end">
           <label className="flex flex-col text-xs text-text-muted">
             Status
             <Select
@@ -225,7 +225,10 @@ export function TasksPage() {
               placeholder="next friday"
             />
           </label>
-          <label className="flex items-center gap-2 pb-1.5 text-xs text-text-muted">
+          {/* No `pb-1.5` on mobile -- that offset exists to bottom-align this
+              checkbox with the labelled fields beside it in the `sm:` flex row, and in
+              the stacked layout it just reads as uneven spacing. */}
+          <label className="flex items-center gap-2 text-xs text-text-muted sm:pb-1.5">
             <input
               type="checkbox"
               checked={filters.overdue_only ?? false}
@@ -238,12 +241,12 @@ export function TasksPage() {
 
         <form
           onSubmit={handleCreate}
-          className="mt-4 flex flex-wrap items-end gap-3 rounded-lg border border-border bg-surface/70 p-4 backdrop-blur-md"
+          className="mt-4 grid grid-cols-1 gap-3 rounded-lg border border-border bg-surface/70 p-4 backdrop-blur-md sm:flex sm:flex-wrap sm:items-end"
         >
           <label className="flex flex-col text-xs text-text-muted">
             Title
             <Input
-              className="mt-1 w-56"
+              className="mt-1 w-full sm:w-56"
               value={form.title}
               onChange={(e) => setForm({ ...form, title: e.target.value })}
               placeholder="Buy milk"
@@ -280,7 +283,7 @@ export function TasksPage() {
               ))}
             </Select>
           </label>
-          <Button type="submit" disabled={creating} loading={creating}>
+          <Button type="submit" disabled={creating} loading={creating} className="w-full sm:w-auto">
             Add task
           </Button>
           {formError && <span className="text-sm text-danger">{formError}</span>}
@@ -323,7 +326,7 @@ export function TasksPage() {
                   )}
                 >
                   {editingId === task.id ? (
-                    <div className="flex flex-wrap items-end gap-3">
+                    <div className="grid grid-cols-1 gap-3 sm:flex sm:flex-wrap sm:items-end">
                       <Input
                         value={editForm.title}
                         onChange={(e) => setEditForm({ ...editForm, title: e.target.value })}
@@ -339,7 +342,7 @@ export function TasksPage() {
                         onChange={(e) => setEditForm({ ...editForm, category: e.target.value })}
                         placeholder="category"
                       />
-                      <div className="w-32">
+                      <div className="w-full sm:w-32">
                         <Select
                           value={editForm.priority}
                           onChange={(e) => setEditForm({ ...editForm, priority: e.target.value })}
@@ -351,27 +354,37 @@ export function TasksPage() {
                           ))}
                         </Select>
                       </div>
-                      <Button onClick={() => handleSaveEdit(task.id)} disabled={busyId === task.id} loading={busyId === task.id}>
-                        Save
-                      </Button>
-                      <Button variant="ghost" onClick={() => setEditingId(null)}>
-                        Cancel
-                      </Button>
+                      {/* Save/Cancel share one row even when the fields above are
+                          stacked -- two short buttons fit a phone width fine, and
+                          stacking them too would push Cancel below the fold. */}
+                      <div className="flex gap-3 sm:contents">
+                        <Button
+                          onClick={() => handleSaveEdit(task.id)}
+                          disabled={busyId === task.id}
+                          loading={busyId === task.id}
+                          className="flex-1 sm:flex-none"
+                        >
+                          Save
+                        </Button>
+                        <Button variant="ghost" onClick={() => setEditingId(null)} className="flex-1 sm:flex-none">
+                          Cancel
+                        </Button>
+                      </div>
                       {editError && <span className="text-sm text-danger">{editError}</span>}
                     </div>
                   ) : (
                     <div className="flex flex-wrap items-center justify-between gap-3">
-                      <div className="flex items-start gap-3">
+                      <div className="flex w-full min-w-0 items-start gap-3 sm:w-auto sm:flex-1">
                         <CompleteCheckbox
                           completed={task.status === 'completed'}
                           busy={busyId === task.id}
                           onComplete={() => handleComplete(task.id)}
                         />
-                        <div>
+                        <div className="min-w-0">
                           <div className="flex flex-wrap items-center gap-2">
                             <span
                               className={cn(
-                                'font-medium text-text',
+                                'break-words font-medium text-text',
                                 task.status === 'completed' && 'text-text-muted line-through',
                               )}
                             >
@@ -386,8 +399,16 @@ export function TasksPage() {
                           </div>
                         </div>
                       </div>
-                      <div className="flex gap-2">
-                        <Button variant="ghost" onClick={() => startEdit(task)}>
+                      {/* Own row on a phone (the title block above takes the full
+                          width), so a long title can't compress "Edit"/"Delete" into
+                          two-line labels. `shrink-0` keeps that from happening on the
+                          shared `sm:` row too. */}
+                      <div className="flex w-full shrink-0 gap-2 sm:w-auto">
+                        <Button
+                          variant="ghost"
+                          onClick={() => startEdit(task)}
+                          className="flex-1 sm:flex-none"
+                        >
                           Edit
                         </Button>
                         <Button
@@ -395,6 +416,7 @@ export function TasksPage() {
                           onClick={() => setPendingDeleteId(task.id)}
                           disabled={busyId === task.id}
                           loading={busyId === task.id}
+                          className="flex-1 sm:flex-none"
                         >
                           Delete
                         </Button>

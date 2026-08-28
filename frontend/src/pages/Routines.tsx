@@ -96,49 +96,63 @@ function StepEditor({
       {steps.map((step, index) => (
         <div
           key={index}
-          className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-surface-2/60 p-2"
+          className="flex flex-col gap-2 rounded-md border border-border bg-surface-2/60 p-2 sm:flex-row sm:flex-wrap sm:items-center"
         >
-          <span className="text-xs text-text-muted">{index + 1}.</span>
-          <div className="w-44">
-            <Select value={step.tool_name} onChange={(e) => update(index, { tool_name: e.target.value })}>
-              {step.tool_name && !tools.some((t) => t.name === step.tool_name) && (
-                <option value={step.tool_name}>{step.tool_name} (unknown)</option>
-              )}
-              {tools.map((tool) => (
-                <option key={tool.name} value={tool.name}>
-                  {tool.name}
-                </option>
-              ))}
-            </Select>
+          {/* `sm:contents` dissolves this wrapper from the `sm:` breakpoint up, so the
+              desktop layout stays the single flat row it has always been while a phone
+              gets index + tool on their own band. Same trick on the action group below. */}
+          <div className="flex items-center gap-2 sm:contents">
+            <span className="text-xs text-text-muted">{index + 1}.</span>
+            <div className="w-full min-w-0 sm:w-44">
+              <Select value={step.tool_name} onChange={(e) => update(index, { tool_name: e.target.value })}>
+                {step.tool_name && !tools.some((t) => t.name === step.tool_name) && (
+                  <option value={step.tool_name}>{step.tool_name} (unknown)</option>
+                )}
+                {tools.map((tool) => (
+                  <option key={tool.name} value={tool.name}>
+                    {tool.name}
+                  </option>
+                ))}
+              </Select>
+            </div>
           </div>
           <Input
-            className="min-w-[10rem] flex-1 font-mono text-xs"
+            className="w-full font-mono text-xs sm:min-w-[10rem] sm:flex-1"
             value={step.paramsText}
             onChange={(e) => update(index, { paramsText: e.target.value })}
             placeholder="{}"
           />
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => move(index, -1)}
-            disabled={index === 0}
-            aria-label="Move step up"
-          >
-            <ArrowUp className="h-3.5 w-3.5" />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            onClick={() => move(index, 1)}
-            disabled={index === steps.length - 1}
-            aria-label="Move step down"
-          >
-            <ArrowDown className="h-3.5 w-3.5" />
-          </Button>
-          <Button type="button" variant="destructive" onClick={() => remove(index)}>
-            <Trash2 className="h-3.5 w-3.5" />
-            Remove
-          </Button>
+          <div className="flex items-center gap-2 sm:contents">
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => move(index, -1)}
+              disabled={index === 0}
+              aria-label="Move step up"
+            >
+              <ArrowUp className="h-3.5 w-3.5" />
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => move(index, 1)}
+              disabled={index === steps.length - 1}
+              aria-label="Move step down"
+            >
+              <ArrowDown className="h-3.5 w-3.5" />
+            </Button>
+            {/* Pushed to the trailing edge on a phone so a destructive action isn't
+                sitting immediately under the thumb path of the two nudge arrows. */}
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => remove(index)}
+              className="ml-auto sm:ml-0"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+              Remove
+            </Button>
+          </div>
         </div>
       ))}
       <Button type="button" variant="ghost" onClick={add} disabled={tools.length === 0}>
@@ -290,7 +304,7 @@ export function RoutinesPage() {
   }
 
   return (
-    <main className="px-6 py-10">
+    <main className="px-4 pb-28 pt-6 sm:px-6 sm:pb-10 sm:pt-10">
       <div className="mx-auto max-w-4xl">
         <p className="text-sm text-text-muted">
           Named sequences of tool calls. Run one on demand, or edit its steps below.
@@ -343,8 +357,8 @@ export function RoutinesPage() {
                 className="p-4 transition-all duration-200 hover:-translate-y-0.5 hover:shadow-lg"
               >
                 <div className="flex flex-wrap items-center justify-between gap-3">
-                  <div>
-                    <span className="font-medium text-text">{routine.name}</span>
+                  <div className="min-w-0">
+                    <span className="break-words font-medium text-text">{routine.name}</span>
                     <span className="ml-2 text-xs text-text-muted">
                       {routine.steps.length} step{routine.steps.length === 1 ? '' : 's'} · {routine.trigger_type}
                     </span>
@@ -361,7 +375,7 @@ export function RoutinesPage() {
                       </p>
                     )}
                   </div>
-                  <div className="flex gap-2">
+                  <div className="grid w-full grid-cols-2 gap-2 sm:flex sm:w-auto sm:gap-2">
                     <Button
                       onClick={() => handleRun(routine.name)}
                       disabled={runningName === routine.name || !routine.enabled}
@@ -407,7 +421,7 @@ export function RoutinesPage() {
                   <div className="mt-3 border-t border-border pt-3">
                     <label className="block text-xs font-medium text-text-muted">Name</label>
                     <Input
-                      className="mt-1 w-64"
+                      className="mt-1 w-full sm:w-64"
                       value={editNameValue}
                       onChange={(e) => setEditNameValue(e.target.value)}
                       placeholder="routine name"
@@ -417,7 +431,12 @@ export function RoutinesPage() {
                     </div>
                     {editError && <p className="mt-2 text-sm text-danger">{editError}</p>}
                     <div className="mt-3 flex gap-2">
-                      <Button onClick={handleSaveEdit} disabled={saving} loading={saving}>
+                      <Button
+                        onClick={handleSaveEdit}
+                        disabled={saving}
+                        loading={saving}
+                        className="w-full sm:w-auto"
+                      >
                         Save
                       </Button>
                     </div>
@@ -427,7 +446,7 @@ export function RoutinesPage() {
                     {routine.steps.map((step, index) => (
                       <li key={index}>
                         {index + 1}. <span className="text-text">{step.tool_name}</span>{' '}
-                        <span className="font-mono">{JSON.stringify(step.params)}</span>
+                        <span className="break-all font-mono">{JSON.stringify(step.params)}</span>
                       </li>
                     ))}
                   </ol>
@@ -454,7 +473,7 @@ export function RoutinesPage() {
           <form onSubmit={handleCreate}>
             <h2 className="font-display text-sm font-semibold text-text">New routine</h2>
             <Input
-              className="mt-2 w-64"
+              className="mt-2 w-full sm:w-64"
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               placeholder="routine name"
@@ -463,7 +482,7 @@ export function RoutinesPage() {
               <StepEditor steps={newSteps} tools={tools} onChange={setNewSteps} />
             </div>
             {createError && <p className="mt-2 text-sm text-danger">{createError}</p>}
-            <Button type="submit" disabled={creating} loading={creating} className="mt-3">
+            <Button type="submit" disabled={creating} loading={creating} className="mt-3 w-full sm:w-auto">
               Create routine
             </Button>
           </form>

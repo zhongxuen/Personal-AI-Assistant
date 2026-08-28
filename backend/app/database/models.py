@@ -44,6 +44,31 @@ class User(Base):
     # added without breaking any pre-existing row; every user created through
     # `AuthService` always sets it.
     password_hash: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # WhatsApp pairing (§37 Phase 13, file 18 prompt 1). WhatsApp identifies a sender by
+    # phone number, not by username/password, so linking is what turns "some number
+    # messaged the webhook" into "this User" -- see app/whatsapp/linking.py. Unique so a
+    # number resolves to at most one account (`WhatsAppLinkService.get_by_phone_number`
+    # relies on that), nullable because the overwhelmingly normal state is "this user has
+    # never linked WhatsApp", exactly like `password_hash` above. Stored in Meta's own
+    # wa_id form -- digits only, country code included, no "+" -- since that is what the
+    # webhook payload carries and normalising at the edges beats guessing at query time.
+    whatsapp_phone_number: Mapped[str | None] = mapped_column(
+        String(32), unique=True, nullable=True
+    )
+    # The short-lived pairing code an already-logged-in user generates and then sends
+    # from WhatsApp once. Cleared the moment it is consumed (single use), so a non-null
+    # value here means "a pairing is in flight", not "this user is linked" --
+    # `whatsapp_phone_number` is the only source of truth for that. Deliberately two
+    # plain columns on `users` rather than a linking table: at most one code can be
+    # outstanding per user, and generating a new one replaces the old one, so a table
+    # would only ever hold one row per user anyway (§41 Rule 1).
+    whatsapp_link_code: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Naive local datetime, matching `TaskReminder.remind_at`'s convention across this
+    # file -- comparisons use `datetime.now()`, never an aware "now", so the two must
+    # not be mixed.
+    whatsapp_link_code_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime, nullable=True
+    )
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
 
@@ -206,4 +231,33 @@ class Permission(Base):
     tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
     scope: Mapped[str] = mapped_column(String(50), nullable=False, default="default")
     allowed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class PushSubscription(Base):
+    """One browser's Web Push subscription (`PushManager.subscribe()`'s result).
+
+    A subscription belongs to a *browser*, not a user session -- one user with a phone
+    and a laptop has two rows, so delivery fans out over every row for that user
+    rather than assuming one. `endpoint` is the push service's own per-browser URL and
+    is the natural key the browser hands back on re-subscribe, hence unique: the
+    browser may rotate its keys for the same endpoint, and that has to update the row
+    rather than accumulate stale duplicates that all push to the same place.
+
+    `keys_p256dh`/`keys_auth` are the browser-generated encryption keys (the `keys`
+    object of the subscription JSON, base64url) that payload encryption needs. They're
+    per-subscription client material, not app secrets -- unrelated to the VAPID pair
+    in `app/config/settings.py`, which is ours.
+    """
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[int] = _pk()
+    # Nullable to match every other user-owned table here (tasks, routines, memories),
+    # which were all written before authentication existed and stayed nullable so
+    # pre-auth rows keep loading. The push routes always set it.
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    endpoint: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    keys_p256dh: Mapped[str] = mapped_column(String(255), nullable=False)
+    keys_auth: Mapped[str] = mapped_column(String(255), nullable=False)
     created_at: Mapped[datetime] = _created_at()

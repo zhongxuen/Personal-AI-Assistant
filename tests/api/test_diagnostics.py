@@ -23,7 +23,8 @@ from app.api.dependencies import (
     get_tool_registry,
     get_tts_provider,
 )
-from app.llm.health import HealthManager
+from app.llm.base import LLMResult
+from app.llm.health import HealthManager, ProviderHealthState
 from app.platforms.discord import get_discord_bot_manager
 from app.tools.registry import ToolRegistry
 from main import app
@@ -47,13 +48,23 @@ class _FakeVoiceProvider:
 
 
 @pytest.fixture()
-def client():
+def health_manager() -> HealthManager:
+    """The one HealthManager the overridden dependency hands back, exposed to tests so
+    the reset tests can bench a provider directly and then assert the route cleared it
+    -- a fresh instance per request (as `lambda: HealthManager()` would give) would
+    make the reset unobservable.
+    """
+    return HealthManager()
+
+
+@pytest.fixture()
+def client(health_manager: HealthManager):
     app.dependency_overrides[get_current_user] = lambda: _StubUser()
     app.dependency_overrides[get_tool_registry] = lambda: ToolRegistry()
     app.dependency_overrides[get_discord_bot_manager] = lambda: _FakeDiscordManager()
     app.dependency_overrides[get_stt_provider] = lambda: _FakeVoiceProvider(True)
     app.dependency_overrides[get_tts_provider] = lambda: _FakeVoiceProvider(False)
-    app.dependency_overrides[get_health_manager] = lambda: HealthManager()
+    app.dependency_overrides[get_health_manager] = lambda: health_manager
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -105,3 +116,62 @@ def test_run_can_be_narrowed_to_one_check(client: TestClient):
     results = response.json()["results"]
     assert len(results) == 1
     assert results[0]["name"] == "database"
+
+
+# -- POST /api/diagnostics/providers/{name}/reset -----------------------------------
+
+
+def test_reset_provider_health_requires_auth():
+    response = TestClient(app).post("/api/diagnostics/providers/gemini/reset")
+    assert response.status_code == 401
+
+
+def test_reset_clears_a_sticky_misconfigured_provider(client: TestClient, health_manager: HealthManager):
+    """The route's whole reason to exist: one PERMANENT_ERROR benches a provider with
+    no cooldown to wait out, so without this the only cure is restarting the process.
+    """
+    health_manager.record_result(
+        "gemini", LLMResult(status="PERMANENT_ERROR", error_type="model_not_found:nope")
+    )
+    assert health_manager.is_usable("gemini") is False
+
+    response = client.post("/api/diagnostics/providers/gemini/reset")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body == {
+        "provider": "gemini",
+        "state": ProviderHealthState.AVAILABLE.value,
+        "healthy": True,
+        "last_error": None,
+    }
+    assert health_manager.is_usable("gemini") is True
+
+
+def test_reset_is_a_no_op_on_an_already_healthy_provider(client: TestClient, health_manager: HealthManager):
+    response = client.post("/api/diagnostics/providers/gemini/reset")
+
+    assert response.status_code == 200
+    assert response.json()["healthy"] is True
+    assert health_manager.is_usable("gemini") is True
+
+
+def test_reset_accepts_a_configured_but_disabled_provider(client: TestClient):
+    """`all_provider_names()` includes disabled providers (e.g. OLLAMA_ENABLED=false),
+    and resetting one ahead of re-enabling it is reasonable -- so this isn't a 422.
+    """
+    response = client.post("/api/diagnostics/providers/ollama/reset")
+
+    assert response.status_code == 200
+    assert response.json()["provider"] == "ollama"
+
+
+def test_reset_with_unknown_provider_returns_422(client: TestClient, health_manager: HealthManager):
+    """`HealthManager.reset()` invents a status entry for any string it's given, so an
+    unvalidated typo would 200 while doing nothing -- the route validates first.
+    """
+    response = client.post("/api/diagnostics/providers/not_a_provider/reset")
+
+    assert response.status_code == 422
+    assert "not_a_provider" in response.json()["detail"]
+    assert "not_a_provider" not in health_manager._statuses

@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Bot, FolderTree, Pause, Play, Trash2 } from 'lucide-react'
+import { Bot, Copy, FolderTree, MessageCircle, Pause, Play, Trash2 } from 'lucide-react'
 import { useMemorySettings } from '../hooks/useMemorySettings'
 import { useDiscordBot } from '../hooks/useDiscordBot'
+import { useWhatsAppLink } from '../hooks/useWhatsAppLink'
 import { useProjects } from '../hooks/useProjects'
 import type { ApplicationMapping } from '../types/memory'
 import type { DiscordBotState } from '../types/discord'
@@ -145,6 +146,196 @@ function DiscordBotPanel() {
         </>
       )}
       {error && <p className="mt-2 text-sm text-danger">Failed to load Discord bot status: {error}</p>}
+    </Panel>
+  )
+}
+
+/** Seconds left until `deadlineMs` (a local `Date.now()` timestamp), ticking down once a
+ * second, or null when there's no deadline. A null deadline starts no interval.
+ */
+function useSecondsRemaining(deadlineMs: number | null): number | null {
+  const [remaining, setRemaining] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (deadlineMs === null) {
+      setRemaining(null)
+      return
+    }
+    const tick = () => setRemaining(Math.max(0, Math.ceil((deadlineMs - Date.now()) / 1000)))
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [deadlineMs])
+
+  return remaining
+}
+
+function formatCountdown(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+/** WhatsApp account linking (file 18). WhatsApp identifies a sender by phone number and
+ * nothing else, so this panel is the authenticated half of the pairing flow: it mints a
+ * short-lived code (`POST /api/whatsapp/link-code`) that the user sends as a normal
+ * WhatsApp message, and the webhook -- which has no bearer token, only Meta's HMAC --
+ * uses that code to decide which account the number belongs to. Nothing here ever
+ * submits a phone number: the number is only learned from a message the user actually
+ * sent, which is what stops anyone claiming someone else's.
+ */
+function WhatsAppLinkPanel() {
+  const { status, code, codeExpiresAtMs, loading, error, generating, unlinking, generate, unlink } =
+    useWhatsAppLink()
+  const { show } = useToast()
+
+  const [confirmingUnlink, setConfirmingUnlink] = useState(false)
+  const remaining = useSecondsRemaining(codeExpiresAtMs)
+  const codeExpired = code !== null && remaining === 0
+
+  async function handleGenerate() {
+    try {
+      await generate()
+    } catch (err) {
+      show(err instanceof Error ? err.message : 'Failed to generate a pairing code.', 'danger')
+    }
+  }
+
+  async function handleUnlink() {
+    try {
+      await unlink()
+      show('WhatsApp number unlinked.', 'success')
+    } catch (err) {
+      show(err instanceof Error ? err.message : 'Failed to unlink WhatsApp.', 'danger')
+    } finally {
+      setConfirmingUnlink(false)
+    }
+  }
+
+  async function handleCopy(value: string) {
+    try {
+      await navigator.clipboard.writeText(value)
+      show('Pairing code copied.', 'success')
+    } catch {
+      // Clipboard access needs a secure context (https or localhost) and can be denied
+      // outright -- the code is on screen either way, so this is a nudge, not a failure.
+      show('Copy failed -- type the code from the screen instead.', 'warning')
+    }
+  }
+
+  function statusBadge() {
+    if (!status) return null
+    if (!status.configured) return <Badge tone="neutral">Not configured</Badge>
+    if (status.linked) return <Badge tone="success">Linked</Badge>
+    if (status.code_pending && !codeExpired) return <Badge tone="warning">Waiting for code</Badge>
+    return <Badge tone="neutral">Not linked</Badge>
+  }
+
+  return (
+    <Panel className="mt-8 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <MessageCircle className="h-4 w-4 text-text-muted" />
+          <h2 className="font-display text-sm font-semibold text-text">WhatsApp</h2>
+        </div>
+        {loading ? <Skeleton className="h-5 w-24 rounded" /> : statusBadge()}
+      </div>
+
+      {loading ? (
+        <Skeleton className="mt-3 h-9 w-48" />
+      ) : !status ? null : !status.configured ? (
+        <p className="mt-2 text-xs text-text-muted">
+          The backend has no WhatsApp credentials, so a pairing code couldn't be delivered
+          anywhere yet. Set <code className="text-text">WHATSAPP_ACCESS_TOKEN</code> and{' '}
+          <code className="text-text">WHATSAPP_PHONE_NUMBER_ID</code> (plus the verify token and app
+          secret the webhook needs) following{' '}
+          <code className="text-text">docs/deployment.md</code>'s "WhatsApp Cloud API setup", then
+          reload this page.
+        </p>
+      ) : status.linked ? (
+        <>
+          <p className="mt-1 text-xs text-text-muted">
+            Messages from this number reach the assistant directly -- ask about your tasks, set a
+            reminder, the same things the chat here can do.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <span className="font-mono text-sm text-text">+{status.phone_number}</span>
+            <Button
+              variant="destructive"
+              onClick={() => setConfirmingUnlink(true)}
+              disabled={unlinking}
+            >
+              Unlink
+            </Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="mt-1 text-xs text-text-muted">
+            Link your phone so you can message the assistant on WhatsApp. Generate a code below and
+            send it as an ordinary WhatsApp message to the assistant's number (the test number in
+            your Meta app's <span className="text-text">WhatsApp &rarr; API Setup</span> panel) --
+            that one message is what tells the backend which account the number belongs to.
+          </p>
+
+          {code && !codeExpired && (
+            <div className="mt-3 rounded-md border border-border bg-surface-2/60 p-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="font-mono text-xl tracking-[0.3em] text-text">{code.code}</span>
+                <Button
+                  variant="ghost"
+                  onClick={() => handleCopy(code.code)}
+                  aria-label="Copy pairing code"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  Copy
+                </Button>
+                {remaining !== null && (
+                  <span className="text-xs text-text-muted">
+                    expires in {formatCountdown(remaining)}
+                  </span>
+                )}
+              </div>
+              <p className="mt-2 text-xs text-text-muted">
+                Send this to the assistant's WhatsApp number -- this panel updates on its own once
+                it arrives. Single-use, and shown only here: reloading won't bring it back.
+              </p>
+            </div>
+          )}
+
+          {codeExpired && (
+            <p className="mt-3 text-xs text-warning">
+              That code expired before it was used. Generate a new one -- only the newest works.
+            </p>
+          )}
+
+          {!code && status.code_pending && (
+            <p className="mt-3 text-xs text-text-muted">
+              A code generated earlier is still outstanding, but it's shown once and isn't
+              retrievable here. If you no longer have it, generate a new one -- that replaces it.
+            </p>
+          )}
+
+          <Button
+            className="mt-3"
+            onClick={handleGenerate}
+            disabled={generating}
+            loading={generating}
+          >
+            {code || status.code_pending ? 'Generate a new code' : 'Generate pairing code'}
+          </Button>
+        </>
+      )}
+
+      {error && <p className="mt-2 text-sm text-danger">Failed to load WhatsApp status: {error}</p>}
+
+      <ConfirmDialog
+        open={confirmingUnlink}
+        message={`Unlink +${status?.phone_number ?? ''}? Messages from it will stop reaching the assistant.`}
+        confirmLabel="Unlink"
+        confirmVariant="destructive"
+        loading={unlinking}
+        onConfirm={handleUnlink}
+        onCancel={() => setConfirmingUnlink(false)}
+      />
     </Panel>
   )
 }
@@ -389,6 +580,11 @@ export function SettingsPage() {
             (`/api/discord/status`), so it renders/loads on its own rather than waiting
             on `loading`/`error` from useMemorySettings. */}
         <DiscordBotPanel />
+
+        {/* Its own data source too (`/api/whatsapp/link`) -- the authenticated half
+            of file 18's pairing flow, sitting next to the Discord panel since both
+            answer the same question: which chat platform can reach the assistant. */}
+        <WhatsAppLinkPanel />
 
         {/* Also independent of useMemorySettings -- its own data source
             (`/api/projects`), same reasoning as DiscordBotPanel above. */}

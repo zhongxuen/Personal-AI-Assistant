@@ -184,3 +184,21 @@ async def test_invalid_api_key_client_error_is_permanent_and_not_retried():
 
     assert result.status == "PERMANENT_ERROR"
     assert generate_content.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_model_404_is_permanent_and_names_the_configured_model():
+    """A 404 means `gemini_model` names something this key can't reach -- the one 4xx
+    that points at our own config, so `error_type` has to carry the model name or the
+    status page just shows an unactionable "NOT_FOUND".
+    """
+    settings = _settings(gemini_model="gemini-does-not-exist", gemini_max_retries=2)
+    generate_content = AsyncMock(side_effect=_client_error(404, "NOT_FOUND"))
+    provider = _provider(settings, generate_content)
+
+    result = await provider.generate(LLMRequest(message="hello"))
+
+    assert result.status == "PERMANENT_ERROR"
+    assert result.error_type == "model_not_found:gemini-does-not-exist"
+    # Never retried: the same model name against the same key can't start existing.
+    assert generate_content.await_count == 1

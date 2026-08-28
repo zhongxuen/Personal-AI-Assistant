@@ -64,9 +64,11 @@ Set these on the **backend host** (Render dashboard → service → Environment)
 | `AUTH_SECRET_KEY` | yes | Long random value, **not** the shipped dev default. Generate: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
 | `AUTH_SEED_USERNAME` / `AUTH_SEED_PASSWORD` | yes (or you can't log in) | One-time bootstrap user, created at startup if it doesn't already exist. |
 | `GEMINI_API_KEY` | yes, for LLM features | Unset → `GeminiProvider.is_available()` is `False`, not an error (deterministic tool routing still works). |
-| `GEMINI_MODEL` | no | Defaults to `gemini-2.5-flash`. |
+| `GEMINI_MODEL` | no | Pinned to `gemini-3.6-flash` in `render.yaml`; defaults to `gemini-2.5-flash` in code if neither is set. **Must be a model `GEMINI_API_KEY` can actually reach** — see [Gemini says MISCONFIGURED — model_not_found](#gemini-says-misconfigured--model_not_found) below. |
 | `OLLAMA_ENABLED` | recommended `false` | No Ollama server is reachable from Render; disables the per-request probe outright. |
 | `DATABASE_URL` | no | Defaults to `sqlite:///./jarvis.db`. See [SQLite persistence](#known-limitations) below before depending on this for real data. |
+| `DISCORD_BOT_TOKEN` | no | Unset -> the Discord bot never starts (`DiscordBotManager.start()` no-ops); the rest of the backend is unaffected. |
+| `WHATSAPP_ACCESS_TOKEN` / `WHATSAPP_PHONE_NUMBER_ID` / `WHATSAPP_VERIFY_TOKEN` / `WHATSAPP_APP_SECRET` | no | All four are needed together for WhatsApp; any one unset -> the feature stays off. See [WhatsApp Cloud API setup](#whatsapp-cloud-api-setup-file-18) below for where each value comes from. |
 
 Set on the **frontend host** (Vercel → project → Settings → Environment Variables):
 
@@ -94,6 +96,120 @@ advisory client-side, since `POST /api/routines/{name}/run` (`app/api/routes/rou
 what actually enforces it, by inferring `RequesterContext.platform` from whether the request
 itself arrived from loopback (`app.api.local_only.is_local_client`) rather than always assuming
 `"desktop"` the way it used to.
+
+## WhatsApp Cloud API setup (file 18)
+
+Account/dashboard work, done once, in Meta's own UI — nothing here is scriptable from this repo,
+which is why it's written down rather than automated. The equivalent for Discord is a single value
+(`DISCORD_BOT_TOKEN`, created in the Discord Developer Portal — see
+`md-files/13-discord-adapter.md`, which references the setup the same way); WhatsApp needs four
+values plus a webhook Meta has to be able to reach, hence the longer walkthrough.
+
+Two things to keep in mind before starting:
+
+- **Don't hardcode Meta's pricing or free-tier terms anywhere** (development plan §3 — the same
+  rule Gemini quotas get). Conversation allowances and rates change; read the current numbers off
+  Meta's docs when you need them, and keep any budget/threshold in `Settings` rather than in code
+  or in this file.
+- **Free-form replies only work inside WhatsApp's 24-hour customer-service window**, which resets
+  each time the user messages in. That covers ordinary chat (someone asks, the assistant answers).
+  Proactive messages *outside* that window — a reminder nobody just asked for — need a
+  Meta-approved message template, which is why reminder delivery over WhatsApp is a separate,
+  later phase (file 18 task 8) rather than part of this setup.
+
+### 1. Create the Meta app and add WhatsApp
+
+1. At [developers.facebook.com](https://developers.facebook.com) → **My Apps → Create App**. Pick
+   the type that offers the WhatsApp product (Meta labels this "Business" today; the label moves
+   around — what matters is that **WhatsApp** appears in the product list afterwards).
+2. In the new app → **Add product → WhatsApp → Set up**. Meta provisions a test WhatsApp Business
+   Account (WABA) and a **free test phone number** with it. That test number is enough for all of
+   development: no purchased number, no business verification.
+3. Open **WhatsApp → API Setup**. This one panel has most of what's needed:
+   - **Phone number ID** — a numeric id shown *under* the test number. This, not the number
+     itself, is `WHATSAPP_PHONE_NUMBER_ID`; outbound sends go to `/{phone_number_id}/messages`.
+   - **WhatsApp Business Account ID** (WABA id) — note it down. The backend doesn't read it, but
+     Meta's own dashboard and any later message-template work do.
+   - **Temporary access token** — valid ~24 hours. Fine for the first day of development; it
+     expires silently, and a send that suddenly 401s is almost always this.
+   - **Recipient phone numbers** — the test number can only message numbers added here (a small
+     fixed limit, currently five). Add your own number and confirm the code WhatsApp sends you,
+     or nothing you build will be able to reply to you.
+
+### 2. Get a long-lived access token
+
+The 24-hour token is only for the first day. For anything that should stay working — including
+the Render deployment — create a **System User** token instead:
+
+1. [business.facebook.com](https://business.facebook.com) → **Business settings → Users → System
+   users → Add**, role Admin.
+2. **Add assets** → assign both the app and the WABA to that system user, with full control.
+3. **Generate new token** → pick the app, set expiration **Never**, and tick the
+   `whatsapp_business_messaging` and `whatsapp_business_management` permissions.
+4. Copy it immediately — Meta shows it exactly once. This is `WHATSAPP_ACCESS_TOKEN`.
+
+### 3. Collect the two webhook secrets
+
+- `WHATSAPP_APP_SECRET` — **App settings → Basic → App secret** (click Show). The webhook route
+  verifies `X-Hub-Signature-256` against this on every inbound POST; it is the inbound
+  caller-identity boundary, the role the bot token plays for Discord.
+- `WHATSAPP_VERIFY_TOKEN` — **you invent this one.** Any long random string
+  (`python -c "import secrets; print(secrets.token_urlsafe(32))"`). It goes into the backend env
+  *and* into Meta's webhook config below; Meta echoes it back on the verification handshake so the
+  route can tell a real subscription request from anyone else's.
+
+### 4. Set the environment variables
+
+Locally in `.env` (see `.env.example`'s placeholder block); on Render, service → Environment. All
+four are backend-only — none is ever sent to a frontend, and unlike `VAPID_PUBLIC_KEY` there is no
+half of this that a browser needs:
+
+```
+WHATSAPP_ACCESS_TOKEN=...        # system user token from step 2
+WHATSAPP_PHONE_NUMBER_ID=...     # numeric id from step 1.3, not the phone number
+WHATSAPP_VERIFY_TOKEN=...        # the string you invented in step 3
+WHATSAPP_APP_SECRET=...          # app secret from step 3
+```
+
+Any one of them unset means WhatsApp stays off and the rest of the backend behaves exactly as it
+does today (`backend/app/config/settings.py`, same convention as `DISCORD_BOT_TOKEN`).
+
+### 5. Point Meta's webhook at the backend
+
+The route (`GET`/`POST /api/whatsapp/webhook`, `backend/app/api/routes/whatsapp_webhook.py`)
+is in place. Meta validates the callback URL at the moment you save it, so it has to be deployed
+and reachable before you save it here.
+
+1. **WhatsApp → Configuration → Edit** in the app dashboard.
+2. **Callback URL**: `https://<backend-host>/api/whatsapp/webhook` — e.g.
+   `https://jarvis-api-hi10.onrender.com/api/whatsapp/webhook`. It must be public HTTPS with a
+   valid certificate; `localhost` will not work. For local development, expose the dev server
+   through a tunnel (`cloudflared tunnel --url http://localhost:8000`, ngrok, or similar) and use
+   the tunnel's HTTPS URL — it changes on each restart, so expect to re-save this during dev.
+3. **Verify token**: the exact `WHATSAPP_VERIFY_TOKEN` value. Meta immediately GETs the callback
+   URL with it and refuses to save unless the route echoes `hub.challenge` back.
+4. **Webhook fields** → subscribe to **`messages`**. Without this, verification succeeds and no
+   message ever arrives — the most common "it saved fine but nothing happens" cause.
+5. Render free-tier note: a spun-down instance can miss the first delivery while it cold-starts.
+   Meta retries, but the keep-warm ping in [Known limitations](#known-limitations) matters more
+   here than it does for the dashboard.
+
+### 6. Link your phone number to your account
+
+A WhatsApp sender is a phone number, not a username and password, so the backend won't act on
+messages from a number it doesn't recognise — and it never creates an account for one, the same
+"no public register route" posture `backend/app/auth/service.py` already takes. Pair once:
+
+1. Signed in to the web app (or with a bearer token), `POST /api/whatsapp/link-code`. It returns a
+   short pairing code, valid ~15 minutes, single use.
+2. Send any WhatsApp message containing that code to the test number, from the phone you want
+   linked (it has to be one of the recipient numbers from step 1.3).
+3. The webhook matches the code, stores your number on your user row, and every later message from
+   that number resolves to you with no code involved. `GET /api/whatsapp/link` shows the current
+   state; `DELETE /api/whatsapp/link` unlinks.
+
+An unlinked number always gets the same reply telling it how to link (`UNLINKED_REPLY` in
+`backend/app/whatsapp/linking.py`) and nothing else — no tool ever runs for it.
 
 ## Deploy order
 
@@ -161,6 +277,37 @@ land on the login page (`frontend/src/pages/Login.tsx`); sign in with the `AUTH_
 credentials and confirm the Chat/Tasks/Routines/Provider Status tabs load real data rather than a
 CORS error in the browser console (a CORS error means the origin string doesn't match exactly) or
 a stuck login (wrong `AUTH_SEED_*` values, or `VITE_API_BASE_URL` pointed at the wrong backend).
+
+## Troubleshooting
+
+### Gemini says MISCONFIGURED — `model_not_found`
+
+Symptom: chat answers every non-deterministic message with *"I can't reach any reasoning provider
+right now, so I can't work through that request. I can still handle direct commands in the
+meantime."*, and the Provider Status page shows `Health: MISCONFIGURED — model_not_found:<name>`.
+
+Cause: `GEMINI_MODEL` names a model the deployed `GEMINI_API_KEY` can't reach — a typo, or a model
+that has since been retired (Google answers both with HTTP 404). `GeminiProvider` classifies that
+as a `PERMANENT_ERROR`, `HealthManager` marks the provider `MISCONFIGURED` on the first one, and
+that state is **sticky** — no cooldown clears it, so every later request skips Gemini entirely and
+falls through to the message above. Note the failing call is a *config* fault, not a quota one:
+it does not consume `GEMINI_DAILY_REQUEST_BUDGET` (see `QuotaManager._UNBILLED_STATUSES`), though
+it does still show up in the Provider Status page's request/failure counts, which report every
+attempt.
+
+Fix:
+
+1. List what the deployed key can actually reach:
+   `python -c "from google import genai; print([m.name for m in genai.Client(api_key='YOUR_KEY').models.list()])"`
+   — run this against the key set on **Render**, which is not necessarily the one in your local
+   `.env`.
+2. Set `GEMINI_MODEL` (Render → `jarvis-api` → Environment) to a name from that list, or update
+   the pinned `value:` in `render.yaml`.
+3. Let Render redeploy. The restart clears the sticky `MISCONFIGURED` (provider health is
+   in-memory only). If you'd rather not wait out a redeploy — or you changed the key/model
+   without triggering one — hit **Reset health** on the Gemini card in the Provider Status page
+   (`POST /api/diagnostics/providers/gemini/reset`), which clears the same state in place. It only
+   clears bookkeeping: if the model name is still wrong, the next request puts it right back.
 
 ## Known limitations
 

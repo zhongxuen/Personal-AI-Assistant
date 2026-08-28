@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
-import { RefreshCw } from 'lucide-react'
+import { RefreshCw, RotateCcw } from 'lucide-react'
 import type { useLlmUsage } from '../hooks/useLlmUsage'
+import { resetProviderHealth } from '../services/api'
 import { LimitBar } from '../components/LimitBar'
 import type { ProviderStatusBadge, ProviderUsage } from '../types/llmUsage'
 import type { BadgeTone } from '../components/ui'
@@ -63,7 +64,54 @@ function Stat({ label, value }: { label: string; value: string | number }) {
   )
 }
 
-function ProviderCard({ provider }: { provider: ProviderUsage }) {
+/** The reset control on an unhealthy provider's card.
+ *
+ * Only rendered when `health.healthy` is false, because that's the only time it does
+ * anything: `HealthManager`'s MISCONFIGURED/DISABLED states are sticky (no cooldown
+ * clears them), so a provider benched by one bad API key or one unreachable
+ * `GEMINI_MODEL` stays out of `AIRouter`'s chain until the backend restarts -- and
+ * every chat meanwhile answers "I can't reach any reasoning provider right now". This
+ * button is what turns "fix the env var, then redeploy" into "fix the env var, then
+ * click this".
+ *
+ * It resets bookkeeping only -- nothing is re-configured and the provider isn't
+ * called -- so if the root cause is still there, the next request simply puts the
+ * provider back into the same state. Hence the `refresh()` on success rather than
+ * optimistically painting the card healthy.
+ */
+function ResetHealthButton({ provider, onDone }: { provider: string; onDone: () => void }) {
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleClick() {
+    setPending(true)
+    setError(null)
+    try {
+      await resetProviderHealth(provider)
+      onDone()
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setPending(false)
+    }
+  }
+
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-3">
+      <Button variant="ghost" loading={pending} onClick={() => void handleClick()}>
+        <RotateCcw className="h-4 w-4" />
+        Reset health
+      </Button>
+      <span className="text-xs text-text-muted">
+        Puts {provider} back in the chain for the next request. Fix the underlying config first
+        &mdash; otherwise it fails straight back to this state.
+      </span>
+      {error && <span className="w-full text-xs text-danger">{error}</span>}
+    </div>
+  )
+}
+
+function ProviderCard({ provider, onReset }: { provider: ProviderUsage; onReset: () => void }) {
   return (
     <Panel className="p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -98,6 +146,10 @@ function ProviderCard({ provider }: { provider: ProviderUsage }) {
           <span className="ml-2 text-danger">— {provider.health.last_error}</span>
         )}
       </div>
+
+      {!provider.health.healthy && (
+        <ResetHealthButton provider={provider.provider} onDone={onReset} />
+      )}
     </Panel>
   )
 }
@@ -160,7 +212,7 @@ export function ProviderStatusPage({ llmUsage }: ProviderStatusPageProps) {
             <StaggerList className="mt-3 space-y-3">
               {data.providers.map((provider) => (
                 <StaggerItem key={provider.provider}>
-                  <ProviderCard provider={provider} />
+                  <ProviderCard provider={provider} onReset={refresh} />
                 </StaggerItem>
               ))}
             </StaggerList>

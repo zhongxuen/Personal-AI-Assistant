@@ -8,7 +8,16 @@ yet, firing each one as a `show_notification` tool call *through* `ToolExecutor`
 never printing/calling the notification tool's handler directly (§41 Rule 6) -- so
 every reminder still gets validated, permission-checked, and logged like any other tool
 call. Started once from `main.py`'s lifespan and shut down on app shutdown so it never
-outlives the process. `app/routines/scheduler.py`'s `RoutineScheduler` (file 04 prompt
+outlives the process.
+
+As of file 17 (mobile/PWA) a due reminder fans out over *two* channels rather than one:
+the `show_notification` tool call above (Windows toast, desktop-only) and, additively
+after it, a Web Push message to every browser the reminding user has subscribed from
+(`app/push/sender.py`). The push half can never weaken the desktop half -- it runs
+after the toast has already fired, it cannot raise, and a dead or expired subscription
+is logged and skipped. See docs/architecture.md, "ReminderScheduler is multi-channel by
+design", for why that fan-out lives here rather than being pushed into a new
+abstraction. `app/routines/scheduler.py`'s `RoutineScheduler` (file 04 prompt
 2, optional) registers its own cron jobs against `self.scheduler` -- the same
 background thread -- instead of starting a second `BackgroundScheduler`; this file
 still only handles task reminders itself.
@@ -25,6 +34,7 @@ from app.core.permissions import RequesterContext
 from app.core.tool_executor import ToolExecutor
 from app.database.database import SessionLocal
 from app.database.models import Task, TaskReminder
+from app.push.sender import WebPushSender
 from app.tools.registry import ToolRegistry
 
 logger = logging.getLogger("jarvis.scheduler")
@@ -33,8 +43,9 @@ POLL_INTERVAL_SECONDS = 30
 
 
 class ReminderScheduler:
-    """Polls `task_reminders` on a background thread and fires due-but-unsent
-    reminders as `show_notification` tool calls.
+    """Polls `task_reminders` on a background thread and delivers due-but-unsent
+    reminders over every channel available to the reminding user: a `show_notification`
+    tool call (desktop toast) plus a Web Push message per subscribed browser.
     """
 
     def __init__(self, registry: ToolRegistry) -> None:
@@ -77,10 +88,14 @@ class ReminderScheduler:
 
             executor = ToolExecutor(self._registry, db=db)
             context = RequesterContext(platform="desktop", scope="scheduler")
+            push_sender = WebPushSender(db)
 
             for reminder in due_reminders:
                 task = db.get(Task, reminder.task_id)
                 title = task.title if task is not None else f"Task #{reminder.task_id}"
+
+                # Channel 1 -- desktop toast, unchanged from file 04. Still goes
+                # through ToolExecutor, never `tool.handler(...)` directly (§41 Rule 6).
                 result = executor.execute(
                     "show_notification",
                     {"title": "Task reminder", "message": title},
@@ -93,9 +108,26 @@ class ReminderScheduler:
                         reminder.task_id,
                         result.error,
                     )
-                # Mark sent either way -- a failed notification tool call shouldn't
-                # retry forever every poll interval; ToolExecutor already logged the
-                # attempt (§41 Rule 6), which is the audit trail we rely on here.
+
+                # Channel 2 -- Web Push to the reminding user's subscribed browsers
+                # (file 17), so a reminder reaches a phone with no tab open. Additive
+                # and strictly second: it runs whatever channel 1 did, it can't raise
+                # (WebPushSender swallows and logs per-subscription failures), and a
+                # user with no subscriptions gets exactly the pre-file-17 behaviour --
+                # one toast and nothing else. `push_subscriptions` is keyed on the
+                # *user*, and a reminder identifies its user only through its task, so
+                # an orphaned reminder (no task row) has no user to push to.
+                push_sender.send_to_user(
+                    task.user_id if task is not None else None,
+                    "Task reminder",
+                    title,
+                )
+
+                # Mark sent once, after both channels -- a failed notification tool
+                # call or a failed push shouldn't retry forever every poll interval;
+                # ToolExecutor already logged the attempt (§41 Rule 6) and
+                # WebPushSender logs each skipped subscription, which is the audit
+                # trail we rely on here.
                 reminder.sent = True
 
             db.commit()

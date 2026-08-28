@@ -49,6 +49,16 @@ services:
       # this to the frontend -- see docs/deployment.md's secrets-boundary section.
       - key: GEMINI_API_KEY
         sync: false
+      # Pinned explicitly rather than left to settings.py's default, so the deployed
+      # model is reviewable here instead of being an invisible fallback. It must be a
+      # model the GEMINI_API_KEY above can actually reach -- Gemini answers an unknown
+      # or retired model name with HTTP 404, which GeminiProvider classifies as a
+      # PERMANENT_ERROR and HealthManager turns into a sticky MISCONFIGURED, i.e. the
+      # provider drops out of the chain and every request falls back to "I can't reach
+      # any reasoning provider". Verify with:
+      #   python -c "from google import genai; print([m.name for m in genai.Client(api_key='KEY').models.list()])"
+      - key: GEMINI_MODEL
+        value: gemini-3.6-flash
       # No Ollama server is reachable from Render -- disable the probe outright
       # instead of letting every request pay OLLAMA_AVAILABILITY_TIMEOUT_SECONDS.
       - key: OLLAMA_ENABLED

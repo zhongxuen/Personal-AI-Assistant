@@ -1,12 +1,13 @@
 import type { HealthResponse } from '../types/health'
 import type { Task, TaskCreateInput, TaskFilters, TaskUpdateInput } from '../types/task'
 import type { Routine, RoutineRunResult, RoutineStep, ToolInfo } from '../types/routine'
-import type { LLMUsageResponse } from '../types/llmUsage'
+import type { LLMUsageResponse, ProviderHealth } from '../types/llmUsage'
 import type { ActivityResponse } from '../types/activity'
 import type { ApplicationMapping, DefaultProject } from '../types/memory'
 import type { VoiceMessageResponse } from '../types/voice'
 import type { AssistantResponse } from '../types/assistant'
 import type { DiscordStatus } from '../types/discord'
+import type { WhatsAppLinkCode, WhatsAppLinkStatus } from '../types/whatsapp'
 import type { DiagnosticCheck, DiagnosticsRunResult } from '../types/diagnostics'
 import type { Project, ProjectRoots } from '../types/project'
 import { authHeaders, clearToken, setToken } from './auth'
@@ -292,6 +293,46 @@ export async function stopDiscordBot(): Promise<DiscordStatus> {
   return response.json() as Promise<DiscordStatus>
 }
 
+// --- WhatsApp account linking (file 18 prompt 1) --------------------------------------
+//
+// Wraps `app.api.routes.whatsapp`'s pairing surface over `WhatsAppLinkService`
+// (backend/app/whatsapp/linking.py). WhatsApp identifies a sender by phone number and
+// nothing else, so this is the half of the flow that happens over an authenticated
+// connection: a code minted here is what lets the (bearer-token-less, HMAC-verified)
+// webhook trust a bare number later. There is deliberately no "link this number"
+// call -- the number is only ever learned from a message the user actually sent.
+
+export async function getWhatsAppLinkStatus(): Promise<WhatsAppLinkStatus> {
+  const response = await fetch(`${API_BASE_URL}/api/whatsapp/link`, { headers: authHeaders() })
+  await ensureOk(response, `Failed to load WhatsApp link status: ${response.status}`)
+  return response.json() as Promise<WhatsAppLinkStatus>
+}
+
+/** POST /api/whatsapp/link-code. Always mints a *new* code and invalidates any previous
+ * one, so calling this twice is safe -- only the newest code works. The returned code is
+ * shown once and never refetchable; `getWhatsAppLinkStatus` only reports that one is
+ * outstanding.
+ */
+export async function createWhatsAppLinkCode(): Promise<WhatsAppLinkCode> {
+  const response = await fetch(`${API_BASE_URL}/api/whatsapp/link-code`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  await ensureOk(response, `Failed to generate a WhatsApp pairing code: ${response.status}`)
+  return response.json() as Promise<WhatsAppLinkCode>
+}
+
+/** DELETE /api/whatsapp/link -- drops the caller's linked number and any outstanding
+ * code. 404s when there was nothing linked, mirroring `DELETE /api/push/subscribe`.
+ */
+export async function unlinkWhatsApp(): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/whatsapp/link`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  await ensureOk(response, `Failed to unlink WhatsApp: ${response.status}`)
+}
+
 // --- System diagnostics (Status tab's "Run system test" button) -----------------------
 //
 // Wraps `app.api.routes.diagnostics`'s read-only self-test battery
@@ -315,6 +356,25 @@ export async function runDiagnostics(checks?: string[]): Promise<DiagnosticsRunR
   })
   await ensureOk(response, `Failed to run diagnostics: ${response.status}`)
   return response.json() as Promise<DiagnosticsRunResult>
+}
+
+/** Clear one provider's in-memory health back to AVAILABLE so `AIRouter` tries it again
+ * on the next request.
+ *
+ * The only way out of `HealthManager`'s sticky MISCONFIGURED/DISABLED states short of
+ * restarting the backend: a single PERMANENT_ERROR (bad `GEMINI_API_KEY`, or a
+ * `GEMINI_MODEL` that key can't reach) benches a provider for the rest of the
+ * process's life, so after fixing the config there'd otherwise be nothing to do but
+ * redeploy. Purely bookkeeping -- it doesn't call the provider or change any config,
+ * so if the underlying problem is still there the next request just re-benches it.
+ */
+export async function resetProviderHealth(provider: string): Promise<ProviderHealth & { provider: string }> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/diagnostics/providers/${encodeURIComponent(provider)}/reset`,
+    { method: 'POST', headers: authHeaders() },
+  )
+  await ensureOk(response, `Failed to reset ${provider} health: ${response.status}`)
+  return response.json() as Promise<ProviderHealth & { provider: string }>
 }
 
 // --- Memory / settings (§37 Phase 8, file 09 prompt 3) --------------------------------

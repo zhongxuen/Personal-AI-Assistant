@@ -23,9 +23,12 @@ from app.api.routes.health import router as health_router
 from app.api.routes.llm_usage import router as llm_usage_router
 from app.api.routes.memory import router as memory_router
 from app.api.routes.projects import router as projects_router
+from app.api.routes.push import router as push_router
 from app.api.routes.routines import router as routines_router
 from app.api.routes.tasks import router as tasks_router
 from app.api.routes.voice import router as voice_router
+from app.api.routes.whatsapp import router as whatsapp_router
+from app.api.routes.whatsapp_webhook import router as whatsapp_webhook_router
 from app.auth.service import AuthService
 from app.config.logging import configure_logging
 from app.config.settings import get_settings
@@ -127,6 +130,13 @@ app.include_router(projects_router, prefix="/api")
 app.include_router(voice_router, prefix="/api")
 app.include_router(discord_router, prefix="/api")
 app.include_router(diagnostics_router, prefix="/api")
+app.include_router(push_router, prefix="/api")
+app.include_router(whatsapp_router, prefix="/api")
+# Same "/api/whatsapp" prefix as the router above, deliberately a separate router:
+# that one is bearer-token authenticated for every route, and Meta's webhook has no
+# token to send -- its caller identity is the X-Hub-Signature-256 HMAC instead. See
+# app/api/routes/whatsapp_webhook.py's docstring.
+app.include_router(whatsapp_webhook_router, prefix="/api")
 
 
 if __name__ == "__main__":

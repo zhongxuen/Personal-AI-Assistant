@@ -49,6 +49,10 @@ def test_db(monkeypatch):
     monkeypatch.setattr("app.routines.engine.SessionLocal", TestSessionLocal)
     monkeypatch.setattr("app.memory.service.SessionLocal", TestSessionLocal)
     monkeypatch.setattr("app.memory.retrieval.SessionLocal", TestSessionLocal)
+    # The WhatsApp webhook's background task opens its own session for the same
+    # reason the tool modules above do -- it runs after the response (and so after a
+    # request-scoped `Depends(get_db)` session would already be closed).
+    monkeypatch.setattr("app.api.routes.whatsapp_webhook.SessionLocal", TestSessionLocal)
 
     yield TestSessionLocal
 

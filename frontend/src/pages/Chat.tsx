@@ -76,8 +76,12 @@ export function ChatPage() {
     }
   }
 
+  // `pb-28` on mobile clears the fixed VoiceControl FAB (bottom-6 + button + "Hold to
+  // talk" label, ~100px), which on a phone-width viewport sits directly on top of this
+  // composer's Send button. Desktop has gutters wide enough that it never overlaps, so
+  // the extra padding is dropped from `sm:` up.
   return (
-    <main className="flex h-full flex-col px-6 py-6">
+    <main className="flex h-full flex-col px-4 pb-28 pt-4 sm:px-6 sm:py-6">
       <div className="mx-auto flex w-full max-w-2xl flex-1 flex-col overflow-hidden">
         <p className="text-sm text-text-muted">
           Talk to Jarvis over the web -- same assistant, same tools, minus anything that needs
@@ -100,7 +104,7 @@ export function ChatPage() {
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 transition={{ duration: 0.25, ease: 'easeOut' }}
                 className={cn(
-                  'flex max-w-[85%] items-start gap-2',
+                  'flex max-w-[92%] items-start gap-2 sm:max-w-[85%]',
                   message.role === 'user' && 'ml-auto flex-row-reverse',
                 )}
               >
@@ -133,12 +137,12 @@ export function ChatPage() {
                       {message.usedLlm ? `Reasoned (${message.provider ?? 'LLM'})` : 'Direct command'}
                     </p>
                   )}
-                  <p className="whitespace-pre-wrap">{message.text}</p>
+                  <p className="whitespace-pre-wrap break-words">{message.text}</p>
                   {message.toolCalls?.map((call, callIndex) => (
                     <p
                       key={callIndex}
                       className={cn(
-                        'mt-1 font-mono text-xs',
+                        'mt-1 break-words font-mono text-xs',
                         isCapabilityRejection(call)
                           ? 'text-warning'
                           : call.result.success
@@ -162,7 +166,7 @@ export function ChatPage() {
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0 }}
                 transition={{ duration: 0.2 }}
-                className="flex max-w-[85%] items-center gap-2"
+                className="flex max-w-[92%] items-center gap-2 sm:max-w-[85%]"
               >
                 <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-primary/50 bg-primary/10 text-primary">
                   <Bot className="h-3.5 w-3.5" />

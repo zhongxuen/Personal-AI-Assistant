@@ -15,3 +15,5 @@ pyttsx3==2.98
 pyperclip==1.9.0
 PyJWT==2.10.1
 discord.py==2.4.0
+pywebpush==2.4.0
+httpx==0.28.1

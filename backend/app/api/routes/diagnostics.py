@@ -8,6 +8,17 @@ lists the component catalog so the dashboard can render a checkbox per component
 anything has run; `POST /run` actually runs the battery (all components, or just the
 `checks` named in the request body).
 
+`POST /providers/{name}/reset` is the one *mutating* route here, and the only way out
+of `HealthManager`'s sticky MISCONFIGURED/DISABLED states short of restarting the
+process: one `PERMANENT_ERROR` (a bad key, or a `GEMINI_MODEL` the key can't reach)
+benches a provider for the rest of the process's life, so without this an operator who
+fixes the config still has to redeploy just to get `AIRouter` to try the provider
+again. It lives here rather than on `app.api.routes.llm_usage` deliberately: that route
+is the read-only status *panel*, this router is where operator actions against live
+components already are (`/diagnostics/run`). It clears bookkeeping only -- it does not
+call the provider or change any configuration, so the worst case is one wasted retry
+that puts the provider straight back into the same bad state.
+
 Every route here requires a valid bearer token (`get_current_user`, router-level
 dependency), same boundary as `app.api.routes.routines`/`app.api.routes.discord` --
 diagnostic detail (which LLM provider is misconfigured, whether the DB is reachable)
@@ -30,6 +41,7 @@ from app.api.dependencies import (
 )
 from app.diagnostics.service import CheckResult, DiagnosticsService
 from app.llm.health import HealthManager
+from app.llm.provider_manager import ProviderManager
 from app.platforms.discord import DiscordBotManager, get_discord_bot_manager
 from app.tools.registry import ToolRegistry
 from app.voice.stt import SpeechToTextProvider
@@ -61,6 +73,19 @@ class DiagnosticsRunIn(BaseModel):
 class DiagnosticsRunOut(BaseModel):
     ok: bool
     results: list[CheckResultOut]
+
+
+class ProviderHealthOut(BaseModel):
+    """The provider's health *after* the reset. Same three fields
+    `app.api.routes.llm_usage`'s `ProviderHealthOut` reports, so the frontend can drop
+    this straight into the card it already renders instead of re-fetching to find out
+    whether the reset took.
+    """
+
+    provider: str
+    state: str
+    healthy: bool
+    last_error: str | None = None
 
 
 def _build_service(
@@ -120,3 +145,40 @@ def run_diagnostics(
 
     results = service.run(only=payload.checks)
     return {"ok": all(r.ok for r in results), "results": [_serialize(r) for r in results]}
+
+
+@router.post("/diagnostics/providers/{provider_name}/reset", response_model=ProviderHealthOut)
+def reset_provider_health(
+    provider_name: str,
+    health_manager: HealthManager = Depends(get_health_manager),
+) -> ProviderHealthOut:
+    """Clear `provider_name` back to a fresh AVAILABLE status so `AIRouter` will try it
+    again on the next request.
+
+    This is bookkeeping only -- `HealthManager` state is in-memory, and resetting it
+    neither calls the provider nor changes any configuration. If whatever benched the
+    provider is still broken, the very next request re-benches it; the reset is what
+    lets a *fixed* provider be picked up without a restart.
+
+    Validated against `ProviderManager.all_provider_names()` rather than passed
+    straight through: `HealthManager.reset()` happily invents a status entry for any
+    string it's given, so an unvalidated typo would 200 while silently doing nothing
+    useful. Disabled-but-configured providers (e.g. Ollama with `OLLAMA_ENABLED=false`)
+    are still accepted -- `all_provider_names()` includes them, and resetting one ahead
+    of re-enabling it is reasonable.
+    """
+    known = ProviderManager().all_provider_names()
+    if provider_name not in known:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown provider '{provider_name}'. Known providers: {', '.join(known)}.",
+        )
+
+    health_manager.reset(provider_name)
+    status = health_manager.get_status(provider_name)
+    return ProviderHealthOut(
+        provider=provider_name,
+        state=status.state.value,
+        healthy=status.healthy,
+        last_error=status.last_error,
+    )
