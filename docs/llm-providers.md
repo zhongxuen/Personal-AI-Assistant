@@ -33,7 +33,7 @@ and you'd rather not pay the (short-timeout) probe on every request; leave it `t
 
 ## Gemini (`GeminiProvider`)
 
-- Config: `GEMINI_API_KEY`, `GEMINI_MODEL` (default `gemini-2.5-flash`),
+- Config: `GEMINI_API_KEY`, `GEMINI_MODEL` (default `gemini-3.6-flash`),
   `GEMINI_TIMEOUT_SECONDS`, `GEMINI_MAX_RETRIES`.
 - `is_available()` is a pure local check -- `GEMINI_API_KEY` unset/empty means
   unavailable, with no network call.

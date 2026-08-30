@@ -37,7 +37,7 @@ def _add_usage_rows(
     status: str = "SUCCESS",
 ) -> None:
     for _ in range(count):
-        row = LLMUsage(provider=provider, model="gemini-2.5-flash", status=status)
+        row = LLMUsage(provider=provider, model="gemini-3.6-flash", status=status)
         session.add(row)
         session.flush()
         if timestamp is not None:

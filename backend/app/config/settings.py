@@ -35,8 +35,15 @@ class Settings(BaseSettings):
     # Gemini (file 05). `gemini_api_key` unset/empty -> GeminiProvider.is_available()
     # returns False without a network call (§41 Rule 3). `gemini_model` is deliberately
     # configurable, not hardcoded (§30) -- swap models via env, not code.
+    #
+    # The default was "gemini-2.5-flash" until 2026-08-30, when Google retired it:
+    # generateContent answers HTTP 404 "no longer available to new users ... use
+    # models/gemini-3.6-flash". GeminiProvider classifies 404 as PERMANENT_ERROR and
+    # HealthManager turns repeats into a sticky MISCONFIGURED, so a retired default
+    # silently drops Gemini out of the provider chain on any environment that doesn't
+    # set GEMINI_MODEL. Keep this default on a model the key can actually reach.
     gemini_api_key: str | None = None
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.6-flash"
     gemini_timeout_seconds: float = 30.0
     # Retries apply only to RETRYABLE_ERROR (timeout/network/5xx) -- never
     # QUOTA_EXHAUSTED or PERMANENT_ERROR (§5). This is a *retry* count, so

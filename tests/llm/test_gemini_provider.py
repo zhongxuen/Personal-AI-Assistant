@@ -33,7 +33,7 @@ def _settings(**overrides) -> Settings:
     """
     defaults: dict = dict(
         gemini_api_key="test-api-key",
-        gemini_model="gemini-2.5-flash",
+        gemini_model="gemini-3.6-flash",
         gemini_timeout_seconds=30.0,
         gemini_max_retries=2,
         # Zero backoff -- these tests assert retry *counts*, not real wall-clock delay.

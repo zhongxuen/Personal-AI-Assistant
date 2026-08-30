@@ -64,7 +64,7 @@ Set these on the **backend host** (Render dashboard → service → Environment)
 | `AUTH_SECRET_KEY` | yes | Long random value, **not** the shipped dev default. Generate: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
 | `AUTH_SEED_USERNAME` / `AUTH_SEED_PASSWORD` | yes (or you can't log in) | One-time bootstrap user, created at startup if it doesn't already exist. |
 | `GEMINI_API_KEY` | yes, for LLM features | Unset → `GeminiProvider.is_available()` is `False`, not an error (deterministic tool routing still works). |
-| `GEMINI_MODEL` | no | Pinned to `gemini-3.6-flash` in `render.yaml`; defaults to `gemini-2.5-flash` in code if neither is set. **Must be a model `GEMINI_API_KEY` can actually reach** — see [Gemini says MISCONFIGURED — model_not_found](#gemini-says-misconfigured--model_not_found) below. |
+| `GEMINI_MODEL` | no | Pinned to `gemini-3.6-flash` in `render.yaml`; same value is the code default if neither is set (`gemini-2.5-flash` was retired by Google on 2026-08-30). **Must be a model `GEMINI_API_KEY` can actually reach** — see [Gemini says MISCONFIGURED — model_not_found](#gemini-says-misconfigured--model_not_found) below. |
 | `OLLAMA_ENABLED` | recommended `false` | No Ollama server is reachable from Render; disables the per-request probe outright. |
 | `DATABASE_URL` | no | Defaults to `sqlite:///./jarvis.db`. See [SQLite persistence](#known-limitations) below before depending on this for real data. |
 | `DISCORD_BOT_TOKEN` | no | Unset -> the Discord bot never starts (`DiscordBotManager.start()` no-ops); the rest of the backend is unaffected. |
