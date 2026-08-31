@@ -55,7 +55,7 @@ from app.llm.quota_manager import QuotaManager
 def _settings(**overrides) -> Settings:
     defaults: dict = dict(
         gemini_api_key="test-api-key",
-        gemini_model="gemini-2.5-flash",
+        gemini_model="gemini-3.6-flash",
         gemini_timeout_seconds=30.0,
         gemini_max_retries=2,
         gemini_retry_base_delay_seconds=0.0,

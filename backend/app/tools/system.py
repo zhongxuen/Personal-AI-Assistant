@@ -14,8 +14,14 @@ clipboard/terminal (§22) -- a web or Discord requester has no local machine to 
 
 `get_time`/`get_system_info` are different in kind: they answer a question ("what time
 is it", "how's this machine doing") with plain text, no control over anything, so they're
-also reachable from `["desktop", "web", "discord", "mobile"]` (§22) -- a chat-based
-interface can ask either one same as a task/timer command.
+also reachable from `["desktop", "web", "discord", "mobile", "whatsapp"]` (§22) -- a
+chat-based interface can ask either one same as a task/timer command. `"whatsapp"`
+(file 18) joins that list for exactly the reason `"mobile"` did: it is another
+text-in/text-out conversational surface whose sender resolves to a real `User`
+(`app/whatsapp/linking.py`), so the question "what can this platform do?" gets the same
+answer chat surfaces already get -- while `list_processes`/`get_process_info` above stay
+desktop-only, because a WhatsApp sender has no local machine to inspect any more than a
+Discord one does.
 """
 
 from __future__ import annotations
@@ -37,7 +43,7 @@ class GetTimeTool:
     description = "Get the current local date and time."
     parameters: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
     permission = PermissionLevel.SAFE
-    platforms = ["desktop", "web", "discord", "mobile"]
+    platforms = ["desktop", "web", "discord", "mobile", "whatsapp"]
     requires_confirmation = False
     # Deliberately NOT cacheable (see app.core.cache.ResponseCache's docstring): safe
     # and side-effect-free, but its whole point is to be exact to the current second,
@@ -62,7 +68,7 @@ class GetSystemInfoTool:
     description = "Get basic OS, CPU, and memory information about this machine."
     parameters: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
     permission = PermissionLevel.SAFE
-    platforms = ["desktop", "web", "discord", "mobile"]
+    platforms = ["desktop", "web", "discord", "mobile", "whatsapp"]
     requires_confirmation = False
     # Cacheable (see app.core.cache.ResponseCache's docstring): safe, side-effect-free,
     # and a snapshot that's fine to serve a few seconds stale -- unlike get_time, no

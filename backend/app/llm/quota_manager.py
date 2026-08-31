@@ -31,6 +31,20 @@ from app.database.models import LLMUsage
 # §8's example table: NORMAL -> WARNING (80%) -> CRITICAL (90%) -> FAILOVER (100%+).
 QuotaStatus = Literal["NORMAL", "WARNING", "CRITICAL", "FAILOVER"]
 
+# `llm_usage.status` values that never cost the provider's real request quota, and so
+# must not cost our internal budget either. A PERMANENT_ERROR is always a config fault
+# on our side -- no API key (`missing_api_key`, which never left the process at all),
+# a rejected key, or a model name the key can't reach (`model_not_found:...`, see
+# `app.llm.gemini._classify_client_error`) -- and Google bills none of those against
+# the daily request quota this budget shadows. Counting them anyway burns the day's
+# budget on calls that produced no reasoning, which then trips FAILOVER and takes the
+# provider out of the chain for a reason that has nothing to do with quota.
+#
+# Everything else still counts: SUCCESS obviously, QUOTA_EXHAUSTED because it's the
+# provider itself saying we spent the quota, and RETRYABLE_ERROR because a timeout or
+# 5xx may well have been metered server-side before it failed.
+_UNBILLED_STATUSES = ("PERMANENT_ERROR",)
+
 
 def start_of_today_utc() -> datetime:
     """Midnight UTC, naive -- matches `LLMUsage.timestamp`'s storage shape (SQLite's
@@ -81,15 +95,28 @@ class QuotaManager:
         return self._budget_for(provider)
 
     def current_usage(self, provider: str) -> int:
-        """Count of `provider`'s `llm_usage` rows since midnight UTC today -- every
-        `generate()` call logs a row regardless of outcome (§5), so this counts
-        *attempts*, matching what the real provider quota would have charged for.
+        """Count of `provider`'s *billable* `llm_usage` rows since midnight UTC today.
+
+        Every `generate()` call logs a row regardless of outcome (§5), so this counts
+        attempts -- but only the ones the real provider quota would have charged for.
+        Rows in `_UNBILLED_STATUSES` are excluded: they're config faults that cost no
+        provider quota, so charging them to our internal budget would be
+        double-punishment (the call already failed *and* the day's budget shrank).
+
+        Note this is deliberately narrower than the request count
+        `app.api.routes.llm_usage` reports -- that panel shows every attempt, because
+        "how many calls did we make and how many failed" is a different question from
+        "how much budget is left".
         """
         if self._db is None:
             return 0
         return (
             self._db.query(LLMUsage)
-            .filter(LLMUsage.provider == provider, LLMUsage.timestamp >= start_of_today_utc())
+            .filter(
+                LLMUsage.provider == provider,
+                LLMUsage.timestamp >= start_of_today_utc(),
+                LLMUsage.status.notin_(_UNBILLED_STATUSES),
+            )
             .count()
         )
 

@@ -16,9 +16,12 @@ reported together for the frontend's status panel:
     `llm_usage` rows this route already aggregates, so it needs no shared instance to
     stay correct.
 
-Read-only: this route cannot reset a provider's health or change its budget --
-`HealthManager.reset()` and quota config stay code-level operator actions, not
-exposed over HTTP.
+Read-only: this route reports status, it never changes it. Quota config stays a
+code-level/environment concern, and the one health mutation that *is* exposed over HTTP
+-- `HealthManager.reset()`, needed to clear a sticky MISCONFIGURED without restarting
+the process -- lives on the diagnostics router instead
+(`POST /api/diagnostics/providers/{name}/reset`, see `app.api.routes.diagnostics`),
+which is where operator actions against live components already are.
 
 Requires a valid bearer token (§34, file 12 prompt 1, router-level `get_current_user`
 dependency) -- this status panel is reachable over the web, not gated by

@@ -127,6 +127,35 @@ def test_open_application_unknown_app_fails_without_touching_the_system(monkeypa
     mock_popen.assert_not_called()
 
 
+def test_open_application_with_target_passes_it_through(monkeypatch, test_db):
+    """The Coding Routine template's `target` (project path for an editor, URL for a
+    browser, `app/tools/applications.py`) reaches the real launch call as an extra
+    argument -- `arguments=` on Windows, an extra argv element elsewhere."""
+    mock_startfile, mock_popen = _patch_launch(monkeypatch)
+    seed_default_applications()
+
+    result = open_application_tool.handler(app_name="vscode", target=r"C:\Coding\portfolio")
+
+    assert result.success is True
+    launched = _launched_mock(mock_startfile, mock_popen)
+    if sys.platform == "win32":
+        launched.assert_called_once_with("code", arguments='"C:\\Coding\\portfolio"')
+    else:
+        launched.assert_called_once_with(["code", r"C:\Coding\portfolio"])
+
+
+def test_open_application_without_target_is_unchanged(monkeypatch, test_db):
+    """No `target` given -> byte-for-byte the same call as before `target` existed
+    (regression guard for every pre-existing caller/alias)."""
+    mock_startfile, mock_popen = _patch_launch(monkeypatch)
+    seed_default_applications()
+
+    open_application_tool.handler(app_name="vscode")
+
+    launched = _launched_mock(mock_startfile, mock_popen)
+    launched.assert_called_once_with(*_expected_launch_call("vscode").args)
+
+
 # --- close_application ---------------------------------------------------------------
 
 

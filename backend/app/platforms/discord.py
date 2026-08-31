@@ -7,11 +7,11 @@ back into text a Discord channel can be sent -- no assistant logic lives here (�
 7); this is translation only, exactly like `DesktopAdapter` (app/platforms/desktop.py)
 and the web route (app/api/routes/assistant.py).
 
-`build_discord_client()`/`run_discord_bot()` wire a real discord.py `Client` on top of
-that: `on_message` recognizes a message addressed to the bot (a leading "Jarvis" or an
-actual @-mention of the bot), builds the request via `DiscordAdapter`, calls
-`AssistantCore.handle()` -- the same entrypoint every other platform calls -- and sends
-the response text back to the channel.
+`build_discord_client()` wires a real discord.py `Client` on top of that: `on_message`
+recognizes a message addressed to the bot (a leading "Jarvis" or an actual @-mention of
+the bot), builds the request via `DiscordAdapter`, calls `AssistantCore.handle()` --
+the same entrypoint every other platform calls -- and sends the response text back to
+the channel.
 
 `AssistantCore.handle()` can itself call `asyncio.run()` on the LLM path (see
 app/core/assistant.py's `_handle_needs_llm`), which raises if called from inside a
@@ -20,14 +20,19 @@ assistant.py) sidestep this for free by running in FastAPI's threadpool; `on_mes
 here is a coroutine, so it has to opt into the same off-loop execution explicitly via
 `asyncio.to_thread`.
 
-The bot is optional: `run_discord_bot()` (started from main.py's lifespan) is a no-op
-when `settings.discord_bot_token` isn't configured, so a dev machine without a Discord
-app configured is unaffected -- see settings.py's `discord_bot_token` docstring.
+`DiscordBotManager` owns the actual client lifecycle: `main.py`'s lifespan calls
+`get_discord_bot_manager().start()` once at process startup (a no-op when
+`settings.discord_bot_token` isn't configured, so a dev machine without a Discord app
+set up is unaffected -- see settings.py's `discord_bot_token` docstring), but unlike the
+old fire-and-forget `run_discord_bot()` this can also be started/stopped again later
+without restarting the backend -- see `app.api.routes.discord`, which is what the web
+dashboard's Settings tab actually calls.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 from typing import Any, Protocol
@@ -50,6 +55,10 @@ _NAME_PREFIX_RE = re.compile(r"^\s*jarvis\s*[,:]?\s*", re.IGNORECASE)
 
 # Discord's hard per-message character cap.
 _DISCORD_MESSAGE_LIMIT = 2000
+
+# Presence text shown under the bot's name in Discord's member list -- purely
+# cosmetic (§ branding), no bearing on message handling above.
+_PRESENCE_ACTIVITY = discord.Activity(type=discord.ActivityType.listening, name='"Jarvis, ..."')
 
 
 class DiscordMessage(Protocol):
@@ -111,6 +120,7 @@ def build_discord_client() -> discord.Client:
     @client.event
     async def on_ready() -> None:
         logger.info("Discord bot connected as %s", client.user)
+        await client.change_presence(activity=_PRESENCE_ACTIVITY)
 
     @client.event
     async def on_message(message: discord.Message) -> None:
@@ -140,15 +150,98 @@ def build_discord_client() -> discord.Client:
     return client
 
 
-async def run_discord_bot() -> None:
-    """Start the Discord bot if `DISCORD_BOT_TOKEN` is configured; a no-op otherwise
-    (§41 Rule 5: the token is backend-only and never required for the rest of the app
-    to run). Intended to be launched as a background task from main.py's lifespan.
-    """
-    token = get_settings().discord_bot_token
-    if not token:
-        logger.info("DISCORD_BOT_TOKEN not set -- Discord bot disabled.")
-        return
+class DiscordBotManager:
+    """Owns the process-wide Discord `discord.Client`'s start/stop lifecycle so it can
+    be toggled on demand -- from the web dashboard's Settings tab (`app.api.routes.
+    discord`), not just fire-and-forgotten once from main.py's lifespan the way the old
+    module-level `run_discord_bot()` was. `main.py` still calls `start()` unconditionally
+    at startup (a no-op when no token is configured, same "absence is a valid,
+    non-crashing state" convention as before), so nothing changes for a deploy that
+    never touches the new routes -- this only adds the ability to stop/restart the bot
+    without restarting the whole backend process.
 
-    client = build_discord_client()
-    await client.start(token)
+    Every method here is a coroutine meant to be awaited from the same asyncio event
+    loop main.py's lifespan runs on; there's no locking beyond that single-loop
+    guarantee, matching every other asyncio-background-task piece in this codebase
+    (e.g. app.tasks.scheduler.ReminderScheduler).
+    """
+
+    def __init__(self) -> None:
+        self._client: discord.Client | None = None
+        self._task: asyncio.Task[None] | None = None
+        self._last_error: str | None = None
+
+    @property
+    def configured(self) -> bool:
+        return bool(get_settings().discord_bot_token)
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    def status(self) -> dict[str, Any]:
+        """Snapshot for `GET /api/discord/status` -- computed live off the client/task
+        rather than tracked via `on_ready`/`on_disconnect` event handlers, so there's
+        exactly one source of truth (discord.py's own `Client.is_ready()`/
+        `Client.is_closed()`) instead of a second copy that could drift from it.
+        """
+        if not self.configured:
+            state = "disabled"
+        elif self._task is None:
+            state = "stopped"
+        elif not self._task.done():
+            state = "connected" if self._client is not None and self._client.is_ready() else "starting"
+        else:
+            state = "error" if self._last_error else "stopped"
+        return {
+            "configured": self.configured,
+            "state": state,
+            "username": str(self._client.user) if self._client and self._client.is_ready() else None,
+            "error": self._last_error,
+        }
+
+    async def start(self) -> None:
+        """No-op if the bot isn't configured or is already running -- safe to call
+        unconditionally, which is exactly what both main.py's lifespan (every startup)
+        and `POST /api/discord/start` (possibly while it's already connected) do.
+        """
+        token = get_settings().discord_bot_token
+        if not token or self.running:
+            return
+        self._last_error = None
+        client = build_discord_client()
+        self._client = client
+        self._task = asyncio.create_task(self._run(client, token))
+
+    async def _run(self, client: discord.Client, token: str) -> None:
+        try:
+            await client.start(token)
+        except Exception as exc:  # noqa: BLE001 -- surfaced via status(), not re-raised: a
+            # crashed bot task must not take the rest of the backend down with it.
+            self._last_error = str(exc)
+            logger.exception("Discord bot task failed")
+
+    async def stop(self) -> None:
+        """No-op if the bot isn't currently running. Closes the live client (which ends
+        `client.start()` inside `_run` cleanly) and waits for that task to actually
+        finish before returning, so a caller that immediately calls `start()` again
+        right after doesn't race the old client's teardown.
+        """
+        if self._client is not None and not self._client.is_closed():
+            await self._client.close()
+        if self._task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
+        self._task = None
+        self._client = None
+
+
+# Process-wide singleton, same convention as `app.api.dependencies`' `_registry`/
+# `_health_manager` -- not defined there because `app.api.dependencies` is imported by
+# this module (`get_health_manager`/`get_tool_registry` above), and importing this
+# module back from there would be circular.
+_discord_bot_manager = DiscordBotManager()
+
+
+def get_discord_bot_manager() -> DiscordBotManager:
+    return _discord_bot_manager

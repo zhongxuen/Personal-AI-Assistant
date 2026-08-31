@@ -1,20 +1,56 @@
+import { useEffect, useRef, useState } from 'react'
+import { RefreshCw, RotateCcw } from 'lucide-react'
 import type { useLlmUsage } from '../hooks/useLlmUsage'
+import { resetProviderHealth } from '../services/api'
 import { LimitBar } from '../components/LimitBar'
 import type { ProviderStatusBadge, ProviderUsage } from '../types/llmUsage'
+import type { BadgeTone } from '../components/ui'
+import { Badge, Button, Panel, PROVIDER_STATUS_TONE, Skeleton, StaggerItem, StaggerList } from '../components/ui'
+import { cn } from '../components/ui/utils'
 
-// §39 MVP UI requirement: one badge per provider, NORMAL/WARNING/CRITICAL/FAILOVER.
-const BADGE_STYLES: Record<ProviderStatusBadge, string> = {
-  NORMAL: 'border-emerald-800 bg-emerald-950/40 text-emerald-300',
-  WARNING: 'border-amber-800 bg-amber-950/40 text-amber-300',
-  CRITICAL: 'border-red-800 bg-red-950/40 text-red-300',
-  FAILOVER: 'border-purple-800 bg-purple-950/40 text-purple-300',
+// `border-current` ping ring needs an explicit text color per tone to pick up (§5's
+// "ping" callout is generic across tones, not just danger/warning).
+const PING_COLOR: Record<BadgeTone, string> = {
+  primary: 'text-primary',
+  secondary: 'text-secondary',
+  success: 'text-success',
+  warning: 'text-warning',
+  danger: 'text-danger',
+  neutral: 'text-text-muted',
+}
+
+/** True for the ~1s right after `status` changes from what it was on the previous
+ * render -- drives the "live-updating badge" ping (§5) so a provider flipping into
+ * WARNING/CRITICAL/FAILOVER between `useLlmUsage`'s 15s polls draws the eye instead of
+ * silently swapping color.
+ */
+function useJustChanged(status: ProviderStatusBadge): boolean {
+  const prev = useRef(status)
+  const [justChanged, setJustChanged] = useState(false)
+
+  useEffect(() => {
+    if (prev.current === status) return
+    prev.current = status
+    setJustChanged(true)
+    const timeout = window.setTimeout(() => setJustChanged(false), 1000)
+    return () => window.clearTimeout(timeout)
+  }, [status])
+
+  return justChanged
 }
 
 function StatusBadge({ status }: { status: ProviderStatusBadge }) {
-  const style = BADGE_STYLES[status] ?? 'border-slate-700 bg-slate-800/60 text-slate-300'
+  const justChanged = useJustChanged(status)
+  const tone = PROVIDER_STATUS_TONE[status]
   return (
-    <span className={`rounded border px-2 py-0.5 text-xs font-semibold tracking-wide ${style}`}>
-      {status}
+    <span className="relative inline-flex">
+      {justChanged && (
+        <span
+          className={cn('absolute inset-0 animate-ping rounded border border-current', PING_COLOR[tone])}
+          aria-hidden="true"
+        />
+      )}
+      <Badge tone={tone}>{status}</Badge>
     </span>
   )
 }
@@ -22,23 +58,66 @@ function StatusBadge({ status }: { status: ProviderStatusBadge }) {
 function Stat({ label, value }: { label: string; value: string | number }) {
   return (
     <div>
-      <div className="text-xs text-slate-500">{label}</div>
-      <div className="text-lg font-semibold text-slate-100">{value}</div>
+      <div className="text-xs text-text-muted">{label}</div>
+      <div className="font-mono text-lg font-semibold text-text">{value}</div>
     </div>
   )
 }
 
-function ProviderCard({ provider }: { provider: ProviderUsage }) {
+/** The reset control on an unhealthy provider's card.
+ *
+ * Only rendered when `health.healthy` is false, because that's the only time it does
+ * anything: `HealthManager`'s MISCONFIGURED/DISABLED states are sticky (no cooldown
+ * clears them), so a provider benched by one bad API key or one unreachable
+ * `GEMINI_MODEL` stays out of `AIRouter`'s chain until the backend restarts -- and
+ * every chat meanwhile answers "I can't reach any reasoning provider right now". This
+ * button is what turns "fix the env var, then redeploy" into "fix the env var, then
+ * click this".
+ *
+ * It resets bookkeeping only -- nothing is re-configured and the provider isn't
+ * called -- so if the root cause is still there, the next request simply puts the
+ * provider back into the same state. Hence the `refresh()` on success rather than
+ * optimistically painting the card healthy.
+ */
+function ResetHealthButton({ provider, onDone }: { provider: string; onDone: () => void }) {
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  async function handleClick() {
+    setPending(true)
+    setError(null)
+    try {
+      await resetProviderHealth(provider)
+      onDone()
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : 'Unknown error')
+    } finally {
+      setPending(false)
+    }
+  }
+
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+    <div className="mt-3 flex flex-wrap items-center gap-3">
+      <Button variant="ghost" loading={pending} onClick={() => void handleClick()}>
+        <RotateCcw className="h-4 w-4" />
+        Reset health
+      </Button>
+      <span className="text-xs text-text-muted">
+        Puts {provider} back in the chain for the next request. Fix the underlying config first
+        &mdash; otherwise it fails straight back to this state.
+      </span>
+      {error && <span className="w-full text-xs text-danger">{error}</span>}
+    </div>
+  )
+}
+
+function ProviderCard({ provider, onReset }: { provider: ProviderUsage; onReset: () => void }) {
+  return (
+    <Panel className="p-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
-          <span className="font-medium text-slate-100">{provider.provider}</span>
-          {!provider.enabled && (
-            <span className="rounded border border-slate-700 px-2 py-0.5 text-xs text-slate-500">
-              not in chain
-            </span>
-          )}
+          <span className="font-medium text-text">{provider.provider}</span>
+          {!provider.enabled && <Badge tone="neutral">not in chain</Badge>}
         </div>
         <StatusBadge status={provider.status} />
       </div>
@@ -58,16 +137,20 @@ function ProviderCard({ provider }: { provider: ProviderUsage }) {
         <Stat label="Fallbacks" value={provider.fallback_count} />
       </div>
 
-      <div className="mt-3 border-t border-slate-800 pt-3 text-xs text-slate-500">
-        Quota: <span className="text-slate-300">{provider.quota_status}</span> · Health:{' '}
-        <span className={provider.health.healthy ? 'text-emerald-400' : 'text-red-400'}>
+      <div className="mt-3 border-t border-border pt-3 text-xs text-text-muted">
+        Quota: <span className="text-text">{provider.quota_status}</span> · Health:{' '}
+        <span className={provider.health.healthy ? 'text-success' : 'text-danger'}>
           {provider.health.state}
         </span>
         {provider.health.last_error && (
-          <span className="ml-2 text-red-400">— {provider.health.last_error}</span>
+          <span className="ml-2 text-danger">— {provider.health.last_error}</span>
         )}
       </div>
-    </div>
+
+      {!provider.health.healthy && (
+        <ResetHealthButton provider={provider.provider} onDone={onReset} />
+      )}
+    </Panel>
   )
 }
 
@@ -81,39 +164,58 @@ export function ProviderStatusPage({ llmUsage }: ProviderStatusPageProps) {
   const { data, loading, error, refresh } = llmUsage
 
   return (
-    <main className="min-h-screen bg-slate-950 px-6 py-10 text-slate-100">
+    <main className="px-6 py-10">
       <div className="mx-auto max-w-4xl">
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-semibold">AI Provider Status</h1>
-            <p className="mt-1 text-sm text-slate-400">
-              Today's usage per LLM provider, plus each provider's live quota/health status.
-            </p>
-          </div>
-          <button
-            onClick={refresh}
-            className="rounded border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800"
-          >
+          <p className="text-sm text-text-muted">
+            Today's usage per LLM provider, plus each provider's live quota/health status.
+          </p>
+          <Button variant="ghost" onClick={refresh}>
+            <RefreshCw className="h-4 w-4" />
             Refresh
-          </button>
+          </Button>
         </div>
 
-        {loading && <p className="mt-6 text-slate-400">Loading provider status…</p>}
-        {error && <p className="mt-6 text-red-400">Failed to load provider status: {error}</p>}
+        {/* Skeleton loaders (§5) instead of a blank page on first fetch -- shaped like
+            a provider card (header row + quota bar + stat grid). `loading` here only
+            covers the initial load (useLlmUsage.ts keeps it false across its 15s
+            background polls), so this never flashes over an already-rendered page. */}
+        {loading && (
+          <div className="mt-6 space-y-3">
+            {[0, 1, 2].map((i) => (
+              <Panel key={i} className="p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <Skeleton className="h-4 w-24" />
+                  <Skeleton className="h-5 w-20 rounded" />
+                </div>
+                <Skeleton className="mt-4 h-2 w-full rounded-full" />
+                <div className="mt-4 grid grid-cols-3 gap-4">
+                  <Skeleton className="h-8 w-full" />
+                  <Skeleton className="h-8 w-full" />
+                  <Skeleton className="h-8 w-full" />
+                </div>
+              </Panel>
+            ))}
+          </div>
+        )}
+        {error && <p className="mt-6 text-danger">Failed to load provider status: {error}</p>}
 
         {data && (
           <>
-            <p className="mt-6 text-xs text-slate-500">
+            <p className="mt-6 font-mono text-xs text-text-muted">
               Generated at {new Date(data.generated_at).toLocaleString()}
             </p>
-            <div className="mt-3 space-y-3">
-              {data.providers.length === 0 && (
-                <p className="text-slate-400">No providers configured.</p>
-              )}
+            {data.providers.length === 0 && (
+              <p className="mt-3 text-text-muted">No providers configured.</p>
+            )}
+            {/* Staggered fade/slide-in on load (§5). */}
+            <StaggerList className="mt-3 space-y-3">
               {data.providers.map((provider) => (
-                <ProviderCard key={provider.provider} provider={provider} />
+                <StaggerItem key={provider.provider}>
+                  <ProviderCard provider={provider} onReset={refresh} />
+                </StaggerItem>
               ))}
-            </div>
+            </StaggerList>
           </>
         )}
       </div>

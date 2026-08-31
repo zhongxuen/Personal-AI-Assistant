@@ -195,6 +195,12 @@ class ToolExecutor:
             "data": result.data,
             "error": result.error,
             "platform": context.platform,
+            # Not used by any permission/execution logic -- carried only so a reader
+            # of tool_execution_logs (app.api.routes.activity) can tell a routine/
+            # scheduler/timer-triggered call apart from one a user or the LLM issued
+            # directly, without a schema change (RequesterContext.scope already
+            # exists; this just persists it alongside the rest of the log entry).
+            "scope": context.scope,
         }
         self.db.add(
             ToolExecutionLog(

@@ -1,0 +1,16 @@
+// Barrel export for the shared `ui/` primitive set (md-files/ui-development.md §4).
+// Pages/features can import from '../components/ui' instead of one file per primitive.
+export * from './Badge'
+export * from './Button'
+export * from './ConfirmDialog'
+export * from './Modal'
+export * from './Panel'
+export * from './ProgressBar'
+export * from './Select'
+export * from './Sidebar'
+export * from './SidebarItem'
+export * from './Skeleton'
+export * from './Stagger'
+export * from './TextArea'
+export * from './Toast'
+export * from './Input'

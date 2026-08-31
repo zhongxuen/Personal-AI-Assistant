@@ -28,9 +28,16 @@ def _settings(**overrides) -> Settings:
     return Settings(_env_file=None, **defaults)
 
 
-def _add_usage_rows(session, *, provider: str, count: int, timestamp: datetime | None = None) -> None:
+def _add_usage_rows(
+    session,
+    *,
+    provider: str,
+    count: int,
+    timestamp: datetime | None = None,
+    status: str = "SUCCESS",
+) -> None:
     for _ in range(count):
-        row = LLMUsage(provider=provider, model="gemini-2.5-flash", status="SUCCESS")
+        row = LLMUsage(provider=provider, model="gemini-3.6-flash", status=status)
         session.add(row)
         session.flush()
         if timestamp is not None:
@@ -57,6 +64,36 @@ def test_current_usage_without_a_db_session_is_zero():
     manager = QuotaManager(settings=_settings(), db=None)
 
     assert manager.current_usage("gemini") == 0
+
+
+def test_current_usage_ignores_permanent_errors_the_provider_never_billed(test_db):
+    """A PERMANENT_ERROR is a config fault on our side (no/bad API key, a model name
+    the key can't reach) -- Google charges none of those against the daily quota this
+    budget shadows, so neither do we. Otherwise a single misconfigured GEMINI_MODEL
+    would eat the whole day's budget one failed request at a time and trip FAILOVER
+    for a reason that has nothing to do with quota.
+    """
+    session = test_db()
+    _add_usage_rows(session, provider="gemini", count=2, status="SUCCESS")
+    _add_usage_rows(session, provider="gemini", count=5, status="PERMANENT_ERROR")
+
+    manager = QuotaManager(settings=_settings(), db=session)
+
+    assert manager.current_usage("gemini") == 2
+
+
+@pytest.mark.parametrize("status", ["QUOTA_EXHAUSTED", "RETRYABLE_ERROR"])
+def test_current_usage_still_counts_failures_that_reached_the_provider(test_db, status):
+    """The other two failure statuses stay counted: QUOTA_EXHAUSTED is the provider
+    itself saying the quota went, and a RETRYABLE_ERROR (timeout/5xx) may well have
+    been metered server-side before it failed.
+    """
+    session = test_db()
+    _add_usage_rows(session, provider="gemini", count=3, status=status)
+
+    manager = QuotaManager(settings=_settings(), db=session)
+
+    assert manager.current_usage("gemini") == 3
 
 
 @pytest.mark.parametrize(

@@ -1,7 +1,24 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
+import { Bot, Copy, FolderTree, MessageCircle, Pause, Play, Trash2 } from 'lucide-react'
 import { useMemorySettings } from '../hooks/useMemorySettings'
+import { useDiscordBot } from '../hooks/useDiscordBot'
+import { useWhatsAppLink } from '../hooks/useWhatsAppLink'
+import { useProjects } from '../hooks/useProjects'
 import type { ApplicationMapping } from '../types/memory'
+import type { DiscordBotState } from '../types/discord'
+import {
+  Badge,
+  Button,
+  ConfirmDialog,
+  Input,
+  Panel,
+  Skeleton,
+  StaggerItem,
+  StaggerList,
+  useToast,
+} from '../components/ui'
+import type { BadgeTone } from '../components/ui'
 
 /** An application mapping mid-edit: command/process_names are kept as raw
  * comma-separated text so the inputs don't fight the user while typing, and parsed
@@ -35,6 +52,404 @@ function toMapping(editable: EditableMapping): ApplicationMapping {
 
 const EMPTY_EDITABLE: EditableMapping = { commandText: '', processNamesText: '' }
 
+// Same tone/label mapping approach as ProviderStatus.tsx's PROVIDER_STATUS_TONE --
+// "connected" reads as success, "error" as danger, "starting" as an in-progress
+// warning, "stopped"/"disabled" as neutral (nothing wrong, just not running).
+const DISCORD_STATE_TONE: Record<DiscordBotState, BadgeTone> = {
+  disabled: 'neutral',
+  stopped: 'neutral',
+  starting: 'warning',
+  connected: 'success',
+  error: 'danger',
+}
+
+const DISCORD_STATE_LABEL: Record<DiscordBotState, string> = {
+  disabled: 'Not configured',
+  stopped: 'Stopped',
+  starting: 'Starting…',
+  connected: 'Connected',
+  error: 'Error',
+}
+
+/** Discord bot start/stop control -- the web-dashboard replacement for having to run
+ * scripts/start-discord-bot.ps1 locally. Talks to whatever backend this frontend is
+ * pointed at (local dev or the deployed Render instance) via `useDiscordBot`, which
+ * wraps `app.api.routes.discord`/`DiscordBotManager`.
+ */
+function DiscordBotPanel() {
+  const { status, loading, error, starting, stopping, start, stop } = useDiscordBot()
+  const { show } = useToast()
+
+  async function handleStart() {
+    try {
+      await start()
+      show('Discord bot started.', 'success')
+    } catch (err) {
+      show(err instanceof Error ? err.message : 'Failed to start the Discord bot.', 'danger')
+    }
+  }
+
+  async function handleStop() {
+    try {
+      await stop()
+      show('Discord bot stopped.', 'success')
+    } catch (err) {
+      show(err instanceof Error ? err.message : 'Failed to stop the Discord bot.', 'danger')
+    }
+  }
+
+  return (
+    <Panel className="mt-8 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <Bot className="h-4 w-4 text-text-muted" />
+          <h2 className="font-display text-sm font-semibold text-text">Discord bot</h2>
+        </div>
+        {loading ? (
+          <Skeleton className="h-5 w-24 rounded" />
+        ) : (
+          status && <Badge tone={DISCORD_STATE_TONE[status.state]}>{DISCORD_STATE_LABEL[status.state]}</Badge>
+        )}
+      </div>
+
+      {loading ? (
+        <Skeleton className="mt-3 h-9 w-32" />
+      ) : !status?.configured ? (
+        <p className="mt-2 text-xs text-text-muted">
+          <code className="text-text">DISCORD_BOT_TOKEN</code> isn't set on the backend, so there's
+          nothing to start yet -- add it to <code className="text-text">.env</code> (local) or the
+          Render dashboard's Environment tab (deployed), then reload this page.
+        </p>
+      ) : (
+        <>
+          <p className="mt-1 text-xs text-text-muted">
+            Talks to and controls whichever backend this page is pointed at -- the same one
+            everything else on this dashboard uses.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {status.state === 'connected' || status.state === 'starting' ? (
+              <Button variant="ghost" onClick={handleStop} disabled={stopping} loading={stopping}>
+                <Pause className="h-3.5 w-3.5" />
+                Stop
+              </Button>
+            ) : (
+              <Button onClick={handleStart} disabled={starting} loading={starting}>
+                <Play className="h-3.5 w-3.5" />
+                Start
+              </Button>
+            )}
+            {status.username && <span className="text-xs text-text-muted">as {status.username}</span>}
+          </div>
+          {status.state === 'error' && status.error && (
+            <p className="mt-2 text-sm text-danger">{status.error}</p>
+          )}
+        </>
+      )}
+      {error && <p className="mt-2 text-sm text-danger">Failed to load Discord bot status: {error}</p>}
+    </Panel>
+  )
+}
+
+/** Seconds left until `deadlineMs` (a local `Date.now()` timestamp), ticking down once a
+ * second, or null when there's no deadline. A null deadline starts no interval.
+ */
+function useSecondsRemaining(deadlineMs: number | null): number | null {
+  const [remaining, setRemaining] = useState<number | null>(null)
+
+  useEffect(() => {
+    if (deadlineMs === null) {
+      setRemaining(null)
+      return
+    }
+    const tick = () => setRemaining(Math.max(0, Math.ceil((deadlineMs - Date.now()) / 1000)))
+    tick()
+    const id = setInterval(tick, 1000)
+    return () => clearInterval(id)
+  }, [deadlineMs])
+
+  return remaining
+}
+
+function formatCountdown(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+/** WhatsApp account linking (file 18). WhatsApp identifies a sender by phone number and
+ * nothing else, so this panel is the authenticated half of the pairing flow: it mints a
+ * short-lived code (`POST /api/whatsapp/link-code`) that the user sends as a normal
+ * WhatsApp message, and the webhook -- which has no bearer token, only Meta's HMAC --
+ * uses that code to decide which account the number belongs to. Nothing here ever
+ * submits a phone number: the number is only learned from a message the user actually
+ * sent, which is what stops anyone claiming someone else's.
+ */
+function WhatsAppLinkPanel() {
+  const { status, code, codeExpiresAtMs, loading, error, generating, unlinking, generate, unlink } =
+    useWhatsAppLink()
+  const { show } = useToast()
+
+  const [confirmingUnlink, setConfirmingUnlink] = useState(false)
+  const remaining = useSecondsRemaining(codeExpiresAtMs)
+  const codeExpired = code !== null && remaining === 0
+
+  async function handleGenerate() {
+    try {
+      await generate()
+    } catch (err) {
+      show(err instanceof Error ? err.message : 'Failed to generate a pairing code.', 'danger')
+    }
+  }
+
+  async function handleUnlink() {
+    try {
+      await unlink()
+      show('WhatsApp number unlinked.', 'success')
+    } catch (err) {
+      show(err instanceof Error ? err.message : 'Failed to unlink WhatsApp.', 'danger')
+    } finally {
+      setConfirmingUnlink(false)
+    }
+  }
+
+  async function handleCopy(value: string) {
+    try {
+      await navigator.clipboard.writeText(value)
+      show('Pairing code copied.', 'success')
+    } catch {
+      // Clipboard access needs a secure context (https or localhost) and can be denied
+      // outright -- the code is on screen either way, so this is a nudge, not a failure.
+      show('Copy failed -- type the code from the screen instead.', 'warning')
+    }
+  }
+
+  function statusBadge() {
+    if (!status) return null
+    if (!status.configured) return <Badge tone="neutral">Not configured</Badge>
+    if (status.linked) return <Badge tone="success">Linked</Badge>
+    if (status.code_pending && !codeExpired) return <Badge tone="warning">Waiting for code</Badge>
+    return <Badge tone="neutral">Not linked</Badge>
+  }
+
+  return (
+    <Panel className="mt-8 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <MessageCircle className="h-4 w-4 text-text-muted" />
+          <h2 className="font-display text-sm font-semibold text-text">WhatsApp</h2>
+        </div>
+        {loading ? <Skeleton className="h-5 w-24 rounded" /> : statusBadge()}
+      </div>
+
+      {loading ? (
+        <Skeleton className="mt-3 h-9 w-48" />
+      ) : !status ? null : !status.configured ? (
+        <p className="mt-2 text-xs text-text-muted">
+          The backend has no WhatsApp credentials, so a pairing code couldn't be delivered
+          anywhere yet. Set <code className="text-text">WHATSAPP_ACCESS_TOKEN</code> and{' '}
+          <code className="text-text">WHATSAPP_PHONE_NUMBER_ID</code> (plus the verify token and app
+          secret the webhook needs) following{' '}
+          <code className="text-text">docs/deployment.md</code>'s "WhatsApp Cloud API setup", then
+          reload this page.
+        </p>
+      ) : status.linked ? (
+        <>
+          <p className="mt-1 text-xs text-text-muted">
+            Messages from this number reach the assistant directly -- ask about your tasks, set a
+            reminder, the same things the chat here can do.
+          </p>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <span className="font-mono text-sm text-text">+{status.phone_number}</span>
+            <Button
+              variant="destructive"
+              onClick={() => setConfirmingUnlink(true)}
+              disabled={unlinking}
+            >
+              Unlink
+            </Button>
+          </div>
+        </>
+      ) : (
+        <>
+          <p className="mt-1 text-xs text-text-muted">
+            Link your phone so you can message the assistant on WhatsApp. Generate a code below and
+            send it as an ordinary WhatsApp message to the assistant's number (the test number in
+            your Meta app's <span className="text-text">WhatsApp &rarr; API Setup</span> panel) --
+            that one message is what tells the backend which account the number belongs to.
+          </p>
+
+          {code && !codeExpired && (
+            <div className="mt-3 rounded-md border border-border bg-surface-2/60 p-3">
+              <div className="flex flex-wrap items-center gap-3">
+                <span className="font-mono text-xl tracking-[0.3em] text-text">{code.code}</span>
+                <Button
+                  variant="ghost"
+                  onClick={() => handleCopy(code.code)}
+                  aria-label="Copy pairing code"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  Copy
+                </Button>
+                {remaining !== null && (
+                  <span className="text-xs text-text-muted">
+                    expires in {formatCountdown(remaining)}
+                  </span>
+                )}
+              </div>
+              <p className="mt-2 text-xs text-text-muted">
+                Send this to the assistant's WhatsApp number -- this panel updates on its own once
+                it arrives. Single-use, and shown only here: reloading won't bring it back.
+              </p>
+            </div>
+          )}
+
+          {codeExpired && (
+            <p className="mt-3 text-xs text-warning">
+              That code expired before it was used. Generate a new one -- only the newest works.
+            </p>
+          )}
+
+          {!code && status.code_pending && (
+            <p className="mt-3 text-xs text-text-muted">
+              A code generated earlier is still outstanding, but it's shown once and isn't
+              retrievable here. If you no longer have it, generate a new one -- that replaces it.
+            </p>
+          )}
+
+          <Button
+            className="mt-3"
+            onClick={handleGenerate}
+            disabled={generating}
+            loading={generating}
+          >
+            {code || status.code_pending ? 'Generate a new code' : 'Generate pairing code'}
+          </Button>
+        </>
+      )}
+
+      {error && <p className="mt-2 text-sm text-danger">Failed to load WhatsApp status: {error}</p>}
+
+      <ConfirmDialog
+        open={confirmingUnlink}
+        message={`Unlink +${status?.phone_number ?? ''}? Messages from it will stop reaching the assistant.`}
+        confirmLabel="Unlink"
+        confirmVariant="destructive"
+        loading={unlinking}
+        onConfirm={handleUnlink}
+        onCancel={() => setConfirmingUnlink(false)}
+      />
+    </Panel>
+  )
+}
+
+/** Scan-root editor for the Coding Routine template's project picker
+ * (`frontend/src/components/CodingRoutinePanel.tsx` / `GET /api/projects`). Roots are
+ * plain folder paths (e.g. the "Coding" folder, or this repo's own temporary "Dev"
+ * location -- see `CLAUDE.md`) whose immediate subdirectories become project options;
+ * this panel only edits the root list, not individual projects -- those come from
+ * whatever's actually on disk under each root.
+ */
+function ProjectRootsPanel() {
+  const { projects, roots, loading, error, saveRoots } = useProjects()
+  const { show } = useToast()
+
+  const [newRoot, setNewRoot] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [rootError, setRootError] = useState<string | null>(null)
+
+  async function persist(nextRoots: string[], successMessage: string) {
+    setSaving(true)
+    setRootError(null)
+    try {
+      await saveRoots(nextRoots)
+      show(successMessage, 'success')
+    } catch (err) {
+      setRootError(err instanceof Error ? err.message : 'Failed to save project folders.')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function handleAddRoot(event: FormEvent) {
+    event.preventDefault()
+    const value = newRoot.trim()
+    if (!value) {
+      setRootError('A folder path is required.')
+      return
+    }
+    if (roots.includes(value)) {
+      setRootError('That folder is already in the list.')
+      return
+    }
+    await persist([...roots, value], `Added '${value}'.`)
+    setNewRoot('')
+  }
+
+  async function handleRemoveRoot(root: string) {
+    if (roots.length <= 1) {
+      setRootError('At least one project folder is required.')
+      return
+    }
+    await persist(
+      roots.filter((r) => r !== root),
+      `Removed '${root}'.`,
+    )
+  }
+
+  return (
+    <Panel className="mt-8 p-4">
+      <div className="flex items-center gap-2">
+        <FolderTree className="h-4 w-4 text-text-muted" />
+        <h2 className="font-display text-sm font-semibold text-text">Project folders</h2>
+      </div>
+      <p className="mt-1 text-xs text-text-muted">
+        Folders scanned for the Coding Routine's project picker -- every immediate subfolder shows
+        up there as an option.
+      </p>
+
+      {loading ? (
+        <Skeleton className="mt-3 h-9 w-64" />
+      ) : (
+        <>
+          <div className="mt-3 space-y-2">
+            {roots.map((root) => (
+              <div
+                key={root}
+                className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface-2/60 p-2"
+              >
+                <span className="font-mono text-xs text-text">{root}</span>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => handleRemoveRoot(root)}
+                  disabled={saving}
+                  aria-label={`Remove ${root}`}
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            ))}
+          </div>
+          <p className="mt-2 text-xs text-text-muted">
+            {projects.length} project{projects.length === 1 ? '' : 's'} found: {projects.map((p) => p.name).join(', ') || 'none yet'}
+          </p>
+          <form onSubmit={handleAddRoot} className="mt-3 flex flex-wrap items-center gap-2">
+            <Input
+              className="w-64 font-mono text-xs"
+              value={newRoot}
+              onChange={(e) => setNewRoot(e.target.value)}
+              placeholder="C:\Users\you\Coding"
+            />
+            <Button type="submit" disabled={saving} loading={saving}>
+              Add folder
+            </Button>
+          </form>
+          {rootError && <p className="mt-2 text-sm text-danger">{rootError}</p>}
+          {error && <p className="mt-2 text-sm text-danger">Failed to load project folders: {error}</p>}
+        </>
+      )}
+    </Panel>
+  )
+}
+
 export function SettingsPage() {
   const {
     applications,
@@ -45,6 +460,7 @@ export function SettingsPage() {
     removeApplication,
     saveDefaultProject,
   } = useMemorySettings()
+  const { show } = useToast()
 
   const [editingAlias, setEditingAlias] = useState<string | null>(null)
   const [editValue, setEditValue] = useState<EditableMapping>(EMPTY_EDITABLE)
@@ -59,6 +475,10 @@ export function SettingsPage() {
   const [projectDraft, setProjectDraft] = useState<string | null>(null)
   const [projectError, setProjectError] = useState<string | null>(null)
   const [savingProject, setSavingProject] = useState(false)
+
+  // Toast-based confirmation replacing `window.confirm()` (§5).
+  const [pendingDeleteAlias, setPendingDeleteAlias] = useState<string | null>(null)
+  const [deletingAlias, setDeletingAlias] = useState(false)
 
   const aliases = Object.keys(applications).sort()
 
@@ -79,6 +499,8 @@ export function SettingsPage() {
     try {
       await saveApplication(alias, mapping)
       setEditingAlias(null)
+      // Inline save confirmation via toast instead of silent success (§5).
+      show(`Saved '${alias}'.`, 'success')
     } catch (err) {
       setEditError(err instanceof Error ? err.message : 'Failed to save mapping.')
     } finally {
@@ -86,10 +508,18 @@ export function SettingsPage() {
     }
   }
 
-  async function handleDelete(alias: string) {
-    if (!window.confirm(`Remove the '${alias}' application mapping?`)) return
-    await removeApplication(alias)
-    if (editingAlias === alias) setEditingAlias(null)
+  async function confirmDelete() {
+    if (!pendingDeleteAlias) return
+    const alias = pendingDeleteAlias
+    setDeletingAlias(true)
+    try {
+      await removeApplication(alias)
+      if (editingAlias === alias) setEditingAlias(null)
+      show(`Removed '${alias}'.`, 'success')
+    } finally {
+      setDeletingAlias(false)
+      setPendingDeleteAlias(null)
+    }
   }
 
   async function handleCreate(event: FormEvent) {
@@ -110,6 +540,7 @@ export function SettingsPage() {
       await saveApplication(alias, mapping)
       setNewAlias('')
       setNewValue(EMPTY_EDITABLE)
+      show(`Added '${alias}'.`, 'success')
     } catch (err) {
       setCreateError(err instanceof Error ? err.message : 'Failed to create mapping.')
     } finally {
@@ -128,6 +559,7 @@ export function SettingsPage() {
     try {
       await saveDefaultProject(value)
       setProjectDraft(null)
+      show('Default project saved.', 'success')
     } catch (err) {
       setProjectError(err instanceof Error ? err.message : 'Failed to save default project.')
     } finally {
@@ -136,160 +568,190 @@ export function SettingsPage() {
   }
 
   return (
-    <main className="min-h-screen bg-slate-950 px-6 py-10 text-slate-100">
+    <main className="px-6 py-10">
       <div className="mx-auto max-w-3xl">
-        <h1 className="text-2xl font-semibold">Settings</h1>
-        <p className="mt-1 text-sm text-slate-400">
-          Memory-backed application mappings and the "coding" routine's default project --
-          the same values <code className="text-slate-300">open_application</code> and{' '}
-          <code className="text-slate-300">run_routine</code> resolve against.
+        <p className="text-sm text-text-muted">
+          Memory-backed application mappings and the "coding" routine's default project -- the
+          same values <code className="text-text">open_application</code> and{' '}
+          <code className="text-text">run_routine</code> resolve against.
         </p>
 
-        {loading && <p className="mt-6 text-slate-400">Loading settings…</p>}
-        {error && <p className="mt-6 text-red-400">Failed to load settings: {error}</p>}
+        {/* Independent of the memory-settings load below -- its own data source
+            (`/api/discord/status`), so it renders/loads on its own rather than waiting
+            on `loading`/`error` from useMemorySettings. */}
+        <DiscordBotPanel />
+
+        {/* Its own data source too (`/api/whatsapp/link`) -- the authenticated half
+            of file 18's pairing flow, sitting next to the Discord panel since both
+            answer the same question: which chat platform can reach the assistant. */}
+        <WhatsAppLinkPanel />
+
+        {/* Also independent of useMemorySettings -- its own data source
+            (`/api/projects`), same reasoning as DiscordBotPanel above. */}
+        <ProjectRootsPanel />
+
+        {/* Skeleton loaders (§5) instead of a blank page while settings fetch --
+            shaped like the default-project panel plus a couple of mapping cards. */}
+        {loading && (
+          <div className="mt-8 space-y-3">
+            <Panel className="p-4">
+              <Skeleton className="h-4 w-32" />
+              <Skeleton className="mt-3 h-9 w-56" />
+            </Panel>
+            {[0, 1].map((i) => (
+              <Panel key={i} className="p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <Skeleton className="h-4 w-24" />
+                  <Skeleton className="h-8 w-16" />
+                </div>
+              </Panel>
+            ))}
+          </div>
+        )}
+        {error && <p className="mt-6 text-danger">Failed to load settings: {error}</p>}
 
         {!loading && !error && (
           <>
-            <section className="mt-8 rounded-lg border border-slate-800 bg-slate-900 p-4">
-              <h2 className="text-sm font-semibold text-slate-200">Default project</h2>
-              <p className="mt-1 text-xs text-slate-500">
+            {/* Grouped panel layout (§5) -- one Panel per logical settings group. */}
+            <Panel className="mt-8 p-4">
+              <h2 className="font-display text-sm font-semibold text-text">Default project</h2>
+              <p className="mt-1 text-xs text-text-muted">
                 The application alias "Start coding" opens alongside your editor and browser.
               </p>
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                <input
-                  className="w-56 rounded border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100"
+                <Input
+                  className="w-56"
                   value={projectDraft ?? defaultProject}
                   onChange={(e) => setProjectDraft(e.target.value)}
                   placeholder="portfolio"
                 />
-                <button
+                <Button
                   onClick={handleSaveProject}
                   disabled={savingProject || (projectDraft ?? defaultProject) === defaultProject}
-                  className="rounded bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+                  loading={savingProject}
                 >
-                  {savingProject ? 'Saving…' : 'Save'}
-                </button>
+                  Save
+                </Button>
               </div>
-              {projectError && <p className="mt-2 text-sm text-red-400">{projectError}</p>}
-            </section>
+              {projectError && <p className="mt-2 text-sm text-danger">{projectError}</p>}
+            </Panel>
 
             <section className="mt-6 space-y-3">
-              <h2 className="text-sm font-semibold text-slate-200">Application mappings</h2>
+              <h2 className="font-display text-sm font-semibold text-text">Application mappings</h2>
               {aliases.length === 0 && (
-                <p className="text-sm text-slate-400">No application mappings yet -- add one below.</p>
+                <p className="text-sm text-text-muted">No application mappings yet -- add one below.</p>
               )}
+              {/* Staggered fade/slide-in on load (§5). */}
+              <StaggerList className="space-y-3">
               {aliases.map((alias) => {
                 const mapping = applications[alias]
                 const isEditing = editingAlias === alias
                 return (
-                  <div key={alias} className="rounded-lg border border-slate-800 bg-slate-900 p-4">
+                  <StaggerItem key={alias}>
+                  <Panel className="p-4">
                     <div className="flex flex-wrap items-center justify-between gap-3">
-                      <span className="font-medium">{alias}</span>
+                      <span className="font-medium text-text">{alias}</span>
                       <div className="flex gap-2">
                         {isEditing ? (
-                          <button
-                            onClick={() => setEditingAlias(null)}
-                            className="rounded border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:bg-slate-800"
-                          >
+                          <Button variant="ghost" onClick={() => setEditingAlias(null)}>
                             Cancel
-                          </button>
+                          </Button>
                         ) : (
-                          <button
-                            onClick={() => startEdit(alias)}
-                            className="rounded border border-slate-700 px-3 py-1 text-xs text-slate-300 hover:bg-slate-800"
-                          >
+                          <Button variant="ghost" onClick={() => startEdit(alias)}>
                             Edit
-                          </button>
+                          </Button>
                         )}
-                        <button
-                          onClick={() => handleDelete(alias)}
-                          className="rounded border border-red-800 px-3 py-1 text-xs text-red-400 hover:bg-red-900/40"
-                        >
+                        <Button variant="destructive" onClick={() => setPendingDeleteAlias(alias)}>
                           Delete
-                        </button>
+                        </Button>
                       </div>
                     </div>
 
                     {isEditing ? (
-                      <div className="mt-3 space-y-2 border-t border-slate-800 pt-3">
-                        <label className="block text-xs text-slate-500">
+                      <div className="mt-3 space-y-2 border-t border-border pt-3">
+                        <label className="block text-xs text-text-muted">
                           Command (comma-separated)
-                          <input
-                            className="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-2 py-1 font-mono text-xs text-slate-100"
+                          <Input
+                            className="mt-1 w-full font-mono text-xs"
                             value={editValue.commandText}
                             onChange={(e) => setEditValue({ ...editValue, commandText: e.target.value })}
                           />
                         </label>
-                        <label className="block text-xs text-slate-500">
+                        <label className="block text-xs text-text-muted">
                           Process names (comma-separated)
-                          <input
-                            className="mt-1 w-full rounded border border-slate-700 bg-slate-800 px-2 py-1 font-mono text-xs text-slate-100"
+                          <Input
+                            className="mt-1 w-full font-mono text-xs"
                             value={editValue.processNamesText}
                             onChange={(e) =>
                               setEditValue({ ...editValue, processNamesText: e.target.value })
                             }
                           />
                         </label>
-                        {editError && <p className="text-sm text-red-400">{editError}</p>}
-                        <button
-                          onClick={() => handleSaveEdit(alias)}
-                          disabled={saving}
-                          className="rounded bg-emerald-600 px-3 py-1 text-sm text-white hover:bg-emerald-500 disabled:opacity-50"
-                        >
-                          {saving ? 'Saving…' : 'Save'}
-                        </button>
+                        {editError && <p className="text-sm text-danger">{editError}</p>}
+                        <Button onClick={() => handleSaveEdit(alias)} disabled={saving} loading={saving}>
+                          Save
+                        </Button>
                       </div>
                     ) : (
-                      <p className="mt-2 text-xs text-slate-400">
-                        command: <span className="font-mono text-slate-300">{mapping.command.join(', ')}</span>
+                      <p className="mt-2 text-xs text-text-muted">
+                        command: <span className="font-mono text-text">{mapping.command.join(', ')}</span>
                         {mapping.process_names.length > 0 && (
                           <>
                             {' '}
                             · process names:{' '}
-                            <span className="font-mono text-slate-300">{mapping.process_names.join(', ')}</span>
+                            <span className="font-mono text-text">{mapping.process_names.join(', ')}</span>
                           </>
                         )}
                       </p>
                     )}
-                  </div>
+                  </Panel>
+                  </StaggerItem>
                 )
               })}
+              </StaggerList>
             </section>
 
-            <form onSubmit={handleCreate} className="mt-6 rounded-lg border border-slate-800 bg-slate-900 p-4">
-              <h2 className="text-sm font-semibold text-slate-200">New application mapping</h2>
-              <div className="mt-3 grid gap-2 sm:grid-cols-3">
-                <input
-                  className="rounded border border-slate-700 bg-slate-800 px-2 py-1 text-sm text-slate-100"
-                  value={newAlias}
-                  onChange={(e) => setNewAlias(e.target.value)}
-                  placeholder="alias (e.g. slack)"
-                />
-                <input
-                  className="rounded border border-slate-700 bg-slate-800 px-2 py-1 font-mono text-xs text-slate-100"
-                  value={newValue.commandText}
-                  onChange={(e) => setNewValue({ ...newValue, commandText: e.target.value })}
-                  placeholder="command (comma-separated)"
-                />
-                <input
-                  className="rounded border border-slate-700 bg-slate-800 px-2 py-1 font-mono text-xs text-slate-100"
-                  value={newValue.processNamesText}
-                  onChange={(e) => setNewValue({ ...newValue, processNamesText: e.target.value })}
-                  placeholder="process names (comma-separated)"
-                />
-              </div>
-              {createError && <p className="mt-2 text-sm text-red-400">{createError}</p>}
-              <button
-                type="submit"
-                disabled={creating}
-                className="mt-3 rounded bg-emerald-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
-              >
-                {creating ? 'Creating…' : 'Add mapping'}
-              </button>
+            <form onSubmit={handleCreate}>
+              <Panel className="mt-6 p-4">
+                <h2 className="font-display text-sm font-semibold text-text">New application mapping</h2>
+                <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                  <Input
+                    value={newAlias}
+                    onChange={(e) => setNewAlias(e.target.value)}
+                    placeholder="alias (e.g. slack)"
+                  />
+                  <Input
+                    className="font-mono text-xs"
+                    value={newValue.commandText}
+                    onChange={(e) => setNewValue({ ...newValue, commandText: e.target.value })}
+                    placeholder="command (comma-separated)"
+                  />
+                  <Input
+                    className="font-mono text-xs"
+                    value={newValue.processNamesText}
+                    onChange={(e) => setNewValue({ ...newValue, processNamesText: e.target.value })}
+                    placeholder="process names (comma-separated)"
+                  />
+                </div>
+                {createError && <p className="mt-2 text-sm text-danger">{createError}</p>}
+                <Button type="submit" disabled={creating} loading={creating} className="mt-3">
+                  Add mapping
+                </Button>
+              </Panel>
             </form>
           </>
         )}
       </div>
+
+      <ConfirmDialog
+        open={pendingDeleteAlias !== null}
+        message={`Remove the '${pendingDeleteAlias}' application mapping?`}
+        confirmLabel="Delete"
+        confirmVariant="destructive"
+        loading={deletingAlias}
+        onConfirm={confirmDelete}
+        onCancel={() => setPendingDeleteAlias(null)}
+      />
     </main>
   )
 }

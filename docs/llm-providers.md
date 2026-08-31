@@ -33,14 +33,30 @@ and you'd rather not pay the (short-timeout) probe on every request; leave it `t
 
 ## Gemini (`GeminiProvider`)
 
-- Config: `GEMINI_API_KEY`, `GEMINI_MODEL` (default `gemini-2.5-flash`),
+- Config: `GEMINI_API_KEY`, `GEMINI_MODEL` (default `gemini-3.6-flash`),
   `GEMINI_TIMEOUT_SECONDS`, `GEMINI_MAX_RETRIES`.
 - `is_available()` is a pure local check -- `GEMINI_API_KEY` unset/empty means
   unavailable, with no network call.
 - Error classification: HTTP 429 / `RESOURCE_EXHAUSTED` -> `QUOTA_EXHAUSTED` (never
   retried); timeout / network blip / 5xx -> `RETRYABLE_ERROR` (retried with
-  exponential backoff up to `GEMINI_MAX_RETRIES`); missing/invalid key or other 4xx ->
-  `PERMANENT_ERROR`.
+  exponential backoff up to `GEMINI_MAX_RETRIES`); HTTP 404 / `NOT_FOUND` ->
+  `PERMANENT_ERROR` with `error_type` `model_not_found:<GEMINI_MODEL>` (the model name
+  is carried through so the Provider Status page says *which* model is wrong);
+  missing/invalid key or other 4xx -> `PERMANENT_ERROR`.
+- A `PERMANENT_ERROR` is the most disruptive outcome of the three, because
+  `HealthManager` marks the provider `MISCONFIGURED` on the *first* one and that state
+  is sticky -- no cooldown clears it, so `AIRouter` skips the provider for the rest of
+  the process's life and every request falls through to "I can't reach any reasoning
+  provider right now". Fix the config, then either restart the backend or clear the
+  state in place with `POST /api/diagnostics/providers/{name}/reset` (authenticated;
+  surfaced as the **Reset health** button on an unhealthy provider's card in the
+  Provider Status page). The reset is bookkeeping only -- it doesn't call the provider
+  or change any config, so if the root cause is still there the next request re-benches
+  the provider immediately.
+- `PERMANENT_ERROR`s do *not* count against `GEMINI_DAILY_REQUEST_BUDGET`
+  (`QuotaManager._UNBILLED_STATUSES`): the real provider quota isn't charged for a
+  rejected key or an unknown model, so neither is the internal budget. They still show
+  up in the Provider Status page's request/failure counts, which report every attempt.
 
 ## Ollama (`OllamaProvider`)
 

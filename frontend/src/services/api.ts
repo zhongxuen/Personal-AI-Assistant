@@ -1,10 +1,15 @@
 import type { HealthResponse } from '../types/health'
 import type { Task, TaskCreateInput, TaskFilters, TaskUpdateInput } from '../types/task'
 import type { Routine, RoutineRunResult, RoutineStep, ToolInfo } from '../types/routine'
-import type { LLMUsageResponse } from '../types/llmUsage'
+import type { LLMUsageResponse, ProviderHealth } from '../types/llmUsage'
+import type { ActivityResponse } from '../types/activity'
 import type { ApplicationMapping, DefaultProject } from '../types/memory'
 import type { VoiceMessageResponse } from '../types/voice'
 import type { AssistantResponse } from '../types/assistant'
+import type { DiscordStatus } from '../types/discord'
+import type { WhatsAppLinkCode, WhatsAppLinkStatus } from '../types/whatsapp'
+import type { DiagnosticCheck, DiagnosticsRunResult } from '../types/diagnostics'
+import type { Project, ProjectRoots } from '../types/project'
 import { authHeaders, clearToken, setToken } from './auth'
 
 // In dev, Vite proxies /api to the FastAPI backend (see vite.config.ts).
@@ -173,6 +178,26 @@ export async function updateRoutineSteps(name: string, steps: RoutineStep[]): Pr
   return response.json() as Promise<Routine>
 }
 
+export async function setRoutineEnabled(name: string, enabled: boolean): Promise<Routine> {
+  const response = await fetch(`${API_BASE_URL}/api/routines/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ enabled }),
+  })
+  await ensureOk(response, `Failed to ${enabled ? 'start' : 'stop'} routine: ${response.status}`)
+  return response.json() as Promise<Routine>
+}
+
+export async function renameRoutine(name: string, newName: string): Promise<Routine> {
+  const response = await fetch(`${API_BASE_URL}/api/routines/${encodeURIComponent(name)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ name: newName }),
+  })
+  await ensureOk(response, `Failed to rename routine: ${response.status}`)
+  return response.json() as Promise<Routine>
+}
+
 export async function deleteRoutine(name: string): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/routines/${encodeURIComponent(name)}`, {
     method: 'DELETE',
@@ -190,12 +215,166 @@ export async function runRoutine(name: string): Promise<RoutineRunResult> {
   return response.json() as Promise<RoutineRunResult>
 }
 
+// --- Project discovery (Coding Routine template) ---------------------------------------
+//
+// Wraps `app.api.routes.projects` (backend/app/projects/discovery.py) -- the "which
+// project am I working on today?" picker behind the Coding Routine builder
+// (frontend/src/components/CodingRoutinePanel.tsx). `roots` is the scan-folder list
+// (edited from Settings); `getProjects` is that list's immediate subdirectories.
+
+export async function getProjects(): Promise<Project[]> {
+  const response = await fetch(`${API_BASE_URL}/api/projects`, { headers: authHeaders() })
+  await ensureOk(response, `Failed to load projects: ${response.status}`)
+  return response.json() as Promise<Project[]>
+}
+
+export async function getProjectRoots(): Promise<ProjectRoots> {
+  const response = await fetch(`${API_BASE_URL}/api/projects/roots`, { headers: authHeaders() })
+  await ensureOk(response, `Failed to load project folders: ${response.status}`)
+  return response.json() as Promise<ProjectRoots>
+}
+
+export async function setProjectRoots(roots: string[]): Promise<ProjectRoots> {
+  const response = await fetch(`${API_BASE_URL}/api/projects/roots`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ roots }),
+  })
+  await ensureOk(response, `Failed to save project folders: ${response.status}`)
+  return response.json() as Promise<ProjectRoots>
+}
+
 // --- LLM provider status (§8, §39) ----------------------------------------------------
 
 export async function getLlmUsage(): Promise<LLMUsageResponse> {
   const response = await fetch(`${API_BASE_URL}/api/llm/usage`, { headers: authHeaders() })
   await ensureOk(response, `Failed to load LLM usage: ${response.status}`)
   return response.json() as Promise<LLMUsageResponse>
+}
+
+// --- Recent activity (tool calls + LLM calls, merged) ---------------------------------
+
+export async function getActivity(limit = 50): Promise<ActivityResponse> {
+  const response = await fetch(`${API_BASE_URL}/api/activity?limit=${limit}`, {
+    headers: authHeaders(),
+  })
+  await ensureOk(response, `Failed to load recent activity: ${response.status}`)
+  return response.json() as Promise<ActivityResponse>
+}
+
+// --- Discord bot control (web dashboard follow-up to file 13) -------------------------
+//
+// Wraps `app.api.routes.discord`'s thin control surface over `DiscordBotManager`
+// (backend/app/platforms/discord.py) -- replaces having to run
+// scripts/start-discord-bot.ps1 locally just to get the bot online/offline; these hit
+// whatever backend is already running (local dev or the deployed Render instance).
+
+export async function getDiscordStatus(): Promise<DiscordStatus> {
+  const response = await fetch(`${API_BASE_URL}/api/discord/status`, { headers: authHeaders() })
+  await ensureOk(response, `Failed to load Discord bot status: ${response.status}`)
+  return response.json() as Promise<DiscordStatus>
+}
+
+export async function startDiscordBot(): Promise<DiscordStatus> {
+  const response = await fetch(`${API_BASE_URL}/api/discord/start`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  await ensureOk(response, `Failed to start the Discord bot: ${response.status}`)
+  return response.json() as Promise<DiscordStatus>
+}
+
+export async function stopDiscordBot(): Promise<DiscordStatus> {
+  const response = await fetch(`${API_BASE_URL}/api/discord/stop`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  await ensureOk(response, `Failed to stop the Discord bot: ${response.status}`)
+  return response.json() as Promise<DiscordStatus>
+}
+
+// --- WhatsApp account linking (file 18 prompt 1) --------------------------------------
+//
+// Wraps `app.api.routes.whatsapp`'s pairing surface over `WhatsAppLinkService`
+// (backend/app/whatsapp/linking.py). WhatsApp identifies a sender by phone number and
+// nothing else, so this is the half of the flow that happens over an authenticated
+// connection: a code minted here is what lets the (bearer-token-less, HMAC-verified)
+// webhook trust a bare number later. There is deliberately no "link this number"
+// call -- the number is only ever learned from a message the user actually sent.
+
+export async function getWhatsAppLinkStatus(): Promise<WhatsAppLinkStatus> {
+  const response = await fetch(`${API_BASE_URL}/api/whatsapp/link`, { headers: authHeaders() })
+  await ensureOk(response, `Failed to load WhatsApp link status: ${response.status}`)
+  return response.json() as Promise<WhatsAppLinkStatus>
+}
+
+/** POST /api/whatsapp/link-code. Always mints a *new* code and invalidates any previous
+ * one, so calling this twice is safe -- only the newest code works. The returned code is
+ * shown once and never refetchable; `getWhatsAppLinkStatus` only reports that one is
+ * outstanding.
+ */
+export async function createWhatsAppLinkCode(): Promise<WhatsAppLinkCode> {
+  const response = await fetch(`${API_BASE_URL}/api/whatsapp/link-code`, {
+    method: 'POST',
+    headers: authHeaders(),
+  })
+  await ensureOk(response, `Failed to generate a WhatsApp pairing code: ${response.status}`)
+  return response.json() as Promise<WhatsAppLinkCode>
+}
+
+/** DELETE /api/whatsapp/link -- drops the caller's linked number and any outstanding
+ * code. 404s when there was nothing linked, mirroring `DELETE /api/push/subscribe`.
+ */
+export async function unlinkWhatsApp(): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/whatsapp/link`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  await ensureOk(response, `Failed to unlink WhatsApp: ${response.status}`)
+}
+
+// --- System diagnostics (Status tab's "Run system test" button) -----------------------
+//
+// Wraps `app.api.routes.diagnostics`'s read-only self-test battery
+// (backend/app/diagnostics/service.py) -- one click to see which component (database,
+// an LLM provider, voice, Discord, ...) is actually broken instead of guessing from
+// backend logs.
+
+export async function getDiagnosticChecks(): Promise<DiagnosticCheck[]> {
+  const response = await fetch(`${API_BASE_URL}/api/diagnostics/checks`, { headers: authHeaders() })
+  await ensureOk(response, `Failed to load diagnostic checks: ${response.status}`)
+  return response.json() as Promise<DiagnosticCheck[]>
+}
+
+/** `checks` omitted (or `undefined`) runs every component; a specific list narrows the
+ * run down to just those (e.g. re-testing just Ollama after restarting it). */
+export async function runDiagnostics(checks?: string[]): Promise<DiagnosticsRunResult> {
+  const response = await fetch(`${API_BASE_URL}/api/diagnostics/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({ checks: checks ?? null }),
+  })
+  await ensureOk(response, `Failed to run diagnostics: ${response.status}`)
+  return response.json() as Promise<DiagnosticsRunResult>
+}
+
+/** Clear one provider's in-memory health back to AVAILABLE so `AIRouter` tries it again
+ * on the next request.
+ *
+ * The only way out of `HealthManager`'s sticky MISCONFIGURED/DISABLED states short of
+ * restarting the backend: a single PERMANENT_ERROR (bad `GEMINI_API_KEY`, or a
+ * `GEMINI_MODEL` that key can't reach) benches a provider for the rest of the
+ * process's life, so after fixing the config there'd otherwise be nothing to do but
+ * redeploy. Purely bookkeeping -- it doesn't call the provider or change any config,
+ * so if the underlying problem is still there the next request just re-benches it.
+ */
+export async function resetProviderHealth(provider: string): Promise<ProviderHealth & { provider: string }> {
+  const response = await fetch(
+    `${API_BASE_URL}/api/diagnostics/providers/${encodeURIComponent(provider)}/reset`,
+    { method: 'POST', headers: authHeaders() },
+  )
+  await ensureOk(response, `Failed to reset ${provider} health: ${response.status}`)
+  return response.json() as Promise<ProviderHealth & { provider: string }>
 }
 
 // --- Memory / settings (§37 Phase 8, file 09 prompt 3) --------------------------------

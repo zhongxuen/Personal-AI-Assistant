@@ -176,3 +176,74 @@ Two adapter shapes exist today, and a new platform is usually closer to one or t
       action gets the `"This action isn't available on {platform}."` rejection
 - [ ] No new business logic added inside the adapter or route — everything still routes through
       the same `AssistantCore.handle()` every other platform calls
+
+## Deliberate abstraction fixes
+
+Files 13/14/16 all carry the same rule: adding a platform must not require editing
+`AssistantCore`, `CommandRouter`, `ToolExecutor`, `AIRouter`, `TaskService`, or `RoutineEngine` —
+and if some core file *does* have to change, that's a signal the abstraction wasn't generic
+enough, so fix the abstraction and record it here as a deliberate fix rather than leaving a
+platform-specific patch in place. This section is where those get recorded. Files 13/14/16 each
+finished with nothing to record (`git diff --stat` against the six was empty). File 17 has one
+entry.
+
+### `ReminderScheduler` is multi-channel by design (file 17)
+
+**What changed.** `ReminderScheduler._poll` (`backend/app/tasks/scheduler.py`) used to deliver a
+due reminder over exactly one channel: a `show_notification` tool call through `ToolExecutor`
+(Windows toast via `winotify`, `platforms = ["desktop"]`). It now delivers over two — that same
+tool call, unchanged and still first, followed by a Web Push message to every browser the
+reminding user has subscribed from (`WebPushSender.send_to_user`, `backend/app/push/sender.py`).
+
+**Why this is an abstraction fix, not a mobile patch.** The old single-channel shape encoded an
+assumption that was true only while the assistant had exactly one client: *the user is sitting at
+the machine the scheduler is running on*. That was never a property of reminders — it was a
+property of there being nowhere else to send them. A reminder is a message to a **user**, and a
+user is reachable on however many surfaces they've registered. So the fix is to make the delivery
+step fan out over the user's channels instead of hardcoding the one that happened to exist first.
+Nothing in the new code mentions mobile, PWAs, or phones; `push_subscriptions` rows come from
+desktop Chrome exactly as readily as from a phone. Had this been written as "if the request came
+from mobile, also push," that would have been the platform-specific patch this rule exists to
+prevent.
+
+**Why it lives in `ReminderScheduler` and not behind a new abstraction.** The obvious alternative
+was a `NotificationChannel` protocol with `DesktopToastChannel`/`WebPushChannel` implementations
+and a registry — the shape `PlatformAdapter` uses for inbound messages. Rejected for now (§41
+Rule 1): there are two channels and one caller, so the protocol would have exactly two
+implementations and no second consumer, and the two aren't actually symmetric — the toast goes
+through `ToolExecutor` (validated, permission-checked, logged as a tool call, §41 Rule 6) while
+push is a direct outbound HTTP send with no tool semantics at all. Forcing both behind one
+interface would mean either dragging push through a fake tool or dropping the toast's audit
+trail. The seam that matters is already drawn correctly: `ReminderScheduler` owns *when* to
+notify and knows nothing about *how* either channel works, and each channel's mechanics live in
+its own module (`app/tools/notifications.py`, `app/push/sender.py`). If a third channel lands and
+the `for reminder in ...` body starts growing per-channel branches, that's the point to promote
+the fan-out to a real `NotificationChannel` list — not before.
+
+**Invariants this change preserves, and how.**
+
+- *The desktop toast can never be weakened by push.* The push send runs strictly after the
+  `show_notification` call has already returned. `WebPushSender.send_to_user` cannot raise —
+  every failure mode (VAPID keys unset, subscription lookup failure, a push service returning
+  404/410/429/5xx, a socket timeout, a malformed row) is caught, logged, and skipped
+  per-subscription — so a dead device cannot stop the other devices, the toast, the remaining
+  reminders in the batch, or the background poll thread.
+- *A user with zero subscriptions gets exactly the pre-file-17 behaviour.* `send_to_user` returns
+  0 immediately on an empty list and on `user_id is None` (every user-owned table here is
+  nullable `user_id`; pre-auth rows have nobody to deliver to). One toast, nothing else, no crash.
+- *VAPID keys unset → the feature no-ops*, same "absence is a valid, non-crashing state"
+  convention as `discord_bot_token`/`gemini_api_key` (`backend/app/config/settings.py`).
+- *The VAPID private key stays in one module.* `app/push/sender.py` is the only file that reads
+  `settings.vapid_private_key` or imports `pywebpush`; `settings.vapid_public_key` remains the
+  one deliberately frontend-exposed secret-shaped value (`docs/security.md`).
+- *The six core files are untouched.* `git diff --stat` against `backend/app/core/assistant.py`,
+  `command_router.py`, `tool_executor.py`, `backend/app/llm/ai_router.py`,
+  `backend/app/tasks/service.py`, and `backend/app/routines/engine.py` is empty. `ReminderScheduler`
+  is deliberately not one of the six — it's the delivery edge, which is exactly why the fan-out
+  belongs there.
+
+**Where the next channel plugs in.** The same loop body. File 18's template-reminder phase
+(`md-files/18-whatsapp-adapter.md`) sends a due reminder as a WhatsApp template message; that is a
+third call alongside the toast and the push, reading its own per-user destination the way
+`WebPushSender` reads `push_subscriptions` — and the point at which the `NotificationChannel`
+promotion above is worth doing.

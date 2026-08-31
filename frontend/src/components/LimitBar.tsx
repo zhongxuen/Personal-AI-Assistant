@@ -1,14 +1,8 @@
 import type { ProviderStatusBadge } from '../types/llmUsage'
-
-// Same semantic colors as ProviderStatus.tsx's badge styles (§39), just as a fill
-// color instead of a border/bg/text triple -- keeps the bar and the badge reading as
-// the same signal at a glance.
-const FILL_STYLES: Record<ProviderStatusBadge, string> = {
-  NORMAL: 'bg-emerald-500',
-  WARNING: 'bg-amber-500',
-  CRITICAL: 'bg-red-500',
-  FAILOVER: 'bg-purple-500',
-}
+import type { BadgeTone } from './ui/Badge'
+import { PROVIDER_STATUS_TONE } from './ui/Badge'
+import { ProgressBar } from './ui/ProgressBar'
+import { cn } from './ui/utils'
 
 interface LimitBarProps {
   label: string
@@ -25,6 +19,13 @@ interface LimitBarProps {
  * nothing itself -- it just renders whatever `useLlmUsage` last fetched, so it
  * updates automatically on that hook's existing interval every time a caller re-
  * renders with fresh `used`/`limit`/`status` props.
+ *
+ * Thin wrapper around the shared `ui/ProgressBar` primitive (md-files/ui-development.md
+ * §4) -- owns the used/limit/status framing and the label row, delegates the actual
+ * track/fill rendering. The fill tone reuses `PROVIDER_STATUS_TONE` so this bar and
+ * `ProviderStatus.tsx`'s badges read as the same signal, and glow-pulses once a
+ * metered provider is at WARNING/CRITICAL (§5), building on the bar's existing width
+ * transition.
  */
 export function LimitBar({ label, used, limit, status, compact = false }: LimitBarProps) {
   const unmetered = limit === null
@@ -33,27 +34,27 @@ export function LimitBar({ label, used, limit, status, compact = false }: LimitB
   // crossed can still land one row over budget) -- the bar communicates "full", not
   // a bar that visually overflows its own track.
   const percent = unmetered ? 100 : Math.min(100, Math.round((used / Math.max(limit, 1)) * 100))
-  const fill = unmetered ? 'bg-slate-600' : FILL_STYLES[status] ?? 'bg-slate-500'
+  const tone: BadgeTone = unmetered ? 'neutral' : PROVIDER_STATUS_TONE[status]
+  const pulse = !unmetered && (status === 'WARNING' || status === 'CRITICAL')
 
   return (
     <div className={compact ? 'min-w-[9rem]' : ''}>
-      <div className={`flex items-baseline justify-between gap-2 ${compact ? 'text-[11px]' : 'text-xs'} text-slate-400`}>
-        <span className="font-medium text-slate-300">{label}</span>
+      <div
+        className={cn(
+          'flex items-baseline justify-between gap-2 text-text-muted',
+          compact ? 'text-[11px]' : 'text-xs',
+        )}
+      >
+        <span className="font-medium text-text">{label}</span>
         <span>{unmetered ? 'unmetered (local)' : `${used} / ${limit} (${percent}%)`}</span>
       </div>
-      <div
-        className={`mt-1 w-full overflow-hidden rounded-full bg-slate-800 ${compact ? 'h-1.5' : 'h-2'}`}
-        role="progressbar"
+      <ProgressBar
+        value={percent}
+        tone={tone}
+        compact={compact}
+        pulse={pulse}
         aria-label={`${label} usage`}
-        aria-valuenow={unmetered ? undefined : used}
-        aria-valuemin={0}
-        aria-valuemax={unmetered ? undefined : limit ?? undefined}
-      >
-        <div
-          className={`h-full rounded-full transition-all duration-500 ${fill}`}
-          style={{ width: `${percent}%` }}
-        />
-      </div>
+      />
     </div>
   )
 }

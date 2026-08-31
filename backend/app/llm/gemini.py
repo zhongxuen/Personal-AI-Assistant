@@ -12,6 +12,9 @@ to act on a non-SUCCESS status (fail over, surface to the user, ...) is file 06'
     timeout / network blip / HTTP 5xx       -> RETRYABLE_ERROR   (retried internally
                                                                     with exponential
                                                                     backoff, then given up)
+    HTTP 404 / NOT_FOUND (unknown model)    -> PERMANENT_ERROR   (never retried;
+                                                                    error_type names
+                                                                    the model)
     missing/invalid API key / other 4xx     -> PERMANENT_ERROR   (never retried)
 """
 
@@ -111,6 +114,15 @@ class GeminiProvider:
         if code == 408:
             # Request Timeout is the one 4xx that's actually transient.
             return "RETRYABLE_ERROR", "request_timeout"
+
+        if code == 404 or status == "NOT_FOUND":
+            # The one 4xx that points at *our* config rather than our credentials:
+            # `gemini_model` names a model this API key can't reach (typo, or a model
+            # that's since been retired). A bare "NOT_FOUND" on the status page can't
+            # be acted on, so name the model -- that's the value the operator has to
+            # go change (GEMINI_MODEL). Still PERMANENT_ERROR: retrying an unchanged
+            # model name against unchanged credentials can't start working.
+            return "PERMANENT_ERROR", f"model_not_found:{self._settings.gemini_model}"
 
         if code in (400, 401, 403) or status in _PERMANENT_STATUSES:
             # Covers a missing/invalid API key and a provider-disabled response --

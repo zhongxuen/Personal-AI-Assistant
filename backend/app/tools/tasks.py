@@ -23,7 +23,13 @@ from app.database.models import Task
 from app.tasks.service import UNSET, VALID_PRIORITIES, TaskService
 from app.tools.base import ToolResult
 
-PLATFORMS = ["desktop", "web", "discord", "mobile"]
+# Every surface a task command can legitimately come from. `"whatsapp"` (file 18) is on
+# this list for the same reason `"discord"` and `"mobile"` are: a task lives in the
+# database, not on a machine, so "add a task"/"what are my tasks" means the same thing
+# from any authenticated conversation. WhatsApp reaches this list only for a *linked*
+# number -- an unlinked sender never gets as far as ToolExecutor at all
+# (`app/api/routes/whatsapp_webhook.py`).
+PLATFORMS = ["desktop", "web", "discord", "mobile", "whatsapp"]
 
 _PRIORITY_ERROR = f"Priority must be one of: {', '.join(VALID_PRIORITIES)}."
 
