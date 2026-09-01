@@ -35,6 +35,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.core.clock import local_now, timezone_label
 from app.core.models import AssistantRequest
 from app.database.models import ConversationMessage
 
@@ -97,14 +98,23 @@ def _relevant_memory(message: str) -> dict[str, Any]:
 
 def build_context(request: AssistantRequest, db: Session | None = None) -> dict[str, Any]:
     """The full `LLMRequest.context` payload for `request` -- current-message context
-    plus bounded recent history plus relevant memory, replacing file 05's naive
-    `{"user_id", "platform"}`-only context. `recent_turns`/`memory` keys are omitted
-    entirely (not sent as empty lists/dicts) when there's nothing to include, so a
+    (including the current wall-clock time, see below) plus bounded recent history plus
+    relevant memory, replacing file 05's naive `{"user_id", "platform"}`-only context.
+    `recent_turns`/`memory` keys are omitted entirely (not sent as empty lists/dicts) when there's nothing to include, so a
     narrow request's prompt doesn't grow just from key noise.
     """
+    now = local_now()
     context: dict[str, Any] = {
         "user_id": request.user_id,
         "platform": request.platform,
+        # An LLM has no clock and no calendar -- left to itself it will invent both,
+        # confidently. Every turn therefore carries the current wall-clock time (in the
+        # user's timezone, per `app.core.clock` -- never the host's), so date-relative
+        # reasoning ("is that overdue?", "what's tomorrow?") is grounded even on the
+        # turns where the model answers directly instead of calling `get_time`.
+        "current_time": now.strftime("%A, %B %d, %Y at %I:%M %p"),
+        "current_time_iso": now.isoformat(),
+        "timezone": timezone_label(),
     }
 
     recent_turns = _recent_turns(db, request.conversation_id)

@@ -9,16 +9,19 @@ and the web route (app/api/routes/assistant.py).
 
 `build_discord_client()` wires a real discord.py `Client` on top of that: `on_message`
 recognizes a message addressed to the bot (a leading "Jarvis" or an actual @-mention of
-the bot), builds the request via `DiscordAdapter`, calls `AssistantCore.handle()` --
-the same entrypoint every other platform calls -- and sends the response text back to
-the channel.
+the bot), builds the request via `AssistantCore.handle_async()` -- the same orchestrator
+every other platform calls -- and sends the response text back to the channel.
 
-`AssistantCore.handle()` can itself call `asyncio.run()` on the LLM path (see
-app/core/assistant.py's `_handle_needs_llm`), which raises if called from inside a
-coroutine's already-running event loop. FastAPI's sync routes (app/api/routes/
-assistant.py) sidestep this for free by running in FastAPI's threadpool; `on_message`
-here is a coroutine, so it has to opt into the same off-loop execution explicitly via
-`asyncio.to_thread`.
+`on_message` awaits `handle_async` directly on discord.py's own event loop. It used to
+hop onto a worker thread via `asyncio.to_thread` and call the synchronous
+`AssistantCore.handle()`, which was forced by `handle()` reaching the LLM through
+`asyncio.run()` (that raises inside an already-running loop). The cost of that detour
+was a brand new event loop for every Discord message, and since an HTTP client's pooled
+connections belong to the loop that opened them, a full TLS handshake to the LLM
+provider on every message too. Awaiting on the bot's long-lived loop lets
+`app.llm.clients` keep one warm connection pool for the life of the process; blocking
+work inside the turn (tool handlers, DB access) is offloaded to threads by
+`AssistantCore` itself, so the loop still isn't held up.
 
 `DiscordBotManager` owns the actual client lifecycle: `main.py`'s lifespan calls
 `get_discord_bot_manager().start()` once at process startup (a no-op when
@@ -129,19 +132,29 @@ def build_discord_client() -> discord.Client:
 
         request = adapter.to_request(message)
 
-        def _handle() -> AssistantResponse:
+        async def _handle() -> AssistantResponse:
             # Own short-lived session, same convention as every other module that
             # isn't handed a request-scoped `db` (AuthService.seed_default_user,
-            # the tools/* handlers) -- and run off the event loop thread (see this
-            # module's docstring) since AssistantCore.handle may call asyncio.run().
+            # the tools/* handlers).
+            #
+            # Awaited on the bot's own event loop rather than pushed onto a worker
+            # thread with `asyncio.to_thread`, which is what this did while
+            # `AssistantCore.handle()` was the only entrypoint (it calls `asyncio.run`,
+            # which raises on a thread that already has a running loop). That detour
+            # meant a throwaway event loop per Discord message, and an HTTP client's
+            # pooled connections die with the loop that opened them -- so every message
+            # re-paid a full TLS handshake to the LLM provider. `handle_async` runs on
+            # discord.py's long-lived loop instead, where `app.llm.clients` can keep the
+            # connection warm, and it offloads its own blocking work (tool handlers, DB)
+            # to threads internally.
             with SessionLocal() as db:
                 core = AssistantCore(
                     get_tool_registry(), db=db, health_manager=get_health_manager()
                 )
-                return core.handle(request)
+                return await core.handle_async(request)
 
         try:
-            response = await asyncio.to_thread(_handle)
+            response = await _handle()
             await message.channel.send(adapter.to_platform_output(response))
         except Exception:
             logger.exception("Failed to handle Discord message from user %s", request.user_id)

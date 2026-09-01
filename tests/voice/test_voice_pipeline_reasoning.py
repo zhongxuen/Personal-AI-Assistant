@@ -91,7 +91,14 @@ def mocked_ai_router_route(monkeypatch):
     resolves to this same mock unbound (no implicit `self`), exactly like patching
     `httpx.Client.send` in tests/core/test_zero_llm.py's `no_network` fixture.
     """
-    mock_route = AsyncMock(return_value=LLMResult(status="SUCCESS", text="a reasoned answer"))
+    # `provider` is normally stamped inside the real `AIRouter.route` from whichever
+    # chain entry answered (app/llm/ai_router.py); replacing `route` wholesale bypasses
+    # that, so the stub supplies it exactly as the real thing would. The assertions on
+    # `provider` downstream are then still meaningful -- they check the voice and text
+    # paths both report who actually answered, rather than a hardcoded "gemini".
+    mock_route = AsyncMock(
+        return_value=LLMResult(status="SUCCESS", text="a reasoned answer", provider="gemini")
+    )
     monkeypatch.setattr(AIRouter, "route", mock_route)
     return mock_route
 

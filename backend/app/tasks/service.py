@@ -20,6 +20,7 @@ import dateparser
 from dateparser.search import search_dates
 from sqlalchemy.orm import Session
 
+from app.core.clock import local_now
 from app.database.models import Task, TaskReminder
 
 VALID_PRIORITIES = ("low", "medium", "high")
@@ -52,7 +53,10 @@ def parse_due(text: str | None, *, base: datetime | None = None) -> datetime | N
         return None
     text = text.strip()
     settings = dict(_DATEPARSER_SETTINGS)
-    settings["RELATIVE_BASE"] = base or datetime.now()
+    # `local_now()`, not `datetime.now()`: "tomorrow at 8pm" means 8pm on the
+    # user's clock, and the host's clock is only the same thing on a desktop
+    # install (deployed, it's UTC -- see `app.core.clock`).
+    settings["RELATIVE_BASE"] = base or local_now()
 
     parsed = dateparser.parse(text, settings=settings)
     if parsed is not None:
@@ -76,7 +80,10 @@ def split_title_and_due(text: str, *, base: datetime | None = None) -> tuple[str
     if not text:
         return text, None
     settings = dict(_DATEPARSER_SETTINGS)
-    settings["RELATIVE_BASE"] = base or datetime.now()
+    # `local_now()`, not `datetime.now()`: "tomorrow at 8pm" means 8pm on the
+    # user's clock, and the host's clock is only the same thing on a desktop
+    # install (deployed, it's UTC -- see `app.core.clock`).
+    settings["RELATIVE_BASE"] = base or local_now()
 
     found = search_dates(text, settings=settings, languages=["en"])
     if not found:
@@ -159,13 +166,17 @@ class TaskService:
 
         if overdue_only:
             query = query.filter(
-                Task.status == "pending", Task.due_at.isnot(None), Task.due_at < datetime.now()
+                Task.status == "pending",
+                Task.due_at.isnot(None),
+                # Same clock the due date was parsed against, so "overdue" means
+                # overdue for the user, not for the server's timezone.
+                Task.due_at < local_now(),
             )
 
         return query.order_by(Task.created_at).all()
 
     def is_overdue(self, task: Task) -> bool:
-        return task.status == "pending" and task.due_at is not None and task.due_at < datetime.now()
+        return task.status == "pending" and task.due_at is not None and task.due_at < local_now()
 
     def edit(
         self,

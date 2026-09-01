@@ -34,7 +34,12 @@ and you'd rather not pay the (short-timeout) probe on every request; leave it `t
 ## Gemini (`GeminiProvider`)
 
 - Config: `GEMINI_API_KEY`, `GEMINI_MODEL` (default `gemini-3.6-flash`),
-  `GEMINI_TIMEOUT_SECONDS`, `GEMINI_MAX_RETRIES`.
+  `GEMINI_TIMEOUT_SECONDS` (default 15), `GEMINI_MAX_RETRIES` (default 1).
+- Those two defaults are tuned for someone waiting on a chat reply rather than for
+  maximum persistence. They were 30s and 2 retries, which combined with backoff let a
+  single failing message occupy ~93 seconds before Gemini gave up and Ollama was even
+  tried. Failover to a local model is a better use of the user's next second than a
+  third attempt at a service that has already failed twice -- failover *is* the retry.
 - `is_available()` is a pure local check -- `GEMINI_API_KEY` unset/empty means
   unavailable, with no network call.
 - Error classification: HTTP 429 / `RESOURCE_EXHAUSTED` -> `QUOTA_EXHAUSTED` (never
@@ -87,3 +92,37 @@ and you'd rather not pay the (short-timeout) probe on every request; leave it `t
   rather than the whole turn failing. If tool calling matters for a given request,
   pick a model known to support it (e.g. `llama3.1`, `qwen2.5`, `mistral-nemo`) rather
   than relying on this fallback.
+
+## Streaming
+
+Both providers also implement `generate_stream()`, the incremental form of
+`generate()`: it yields `LLMStreamChunk` text deltas as the model produces them, then
+exactly one terminal chunk carrying the complete `LLMResult`. `AIRouter.route_stream()`
+walks the same chain, with the same quota and health gating, and
+`AssistantCore.handle_stream()` turns the result into `AssistantStreamEvent`s for
+`POST /api/assistant/stream` (see `docs/architecture.md`).
+
+Why it exists: without streaming, time-to-first-character equals the entire generation
+time, so the chat sits on a motionless typing indicator for the whole turn. That is
+worst on the Ollama fallback, where a local CPU model routinely takes 15-20 seconds for
+a couple of sentences -- the slowest replies the assistant gives are exactly the ones
+that showed no sign of life. Total duration is unchanged; when the user first sees
+something is not.
+
+Three rules the implementations share, and any future provider must too:
+
+- **Exactly one terminal chunk, always.** On success and on every failure alike. A
+  stream must never raise where `generate()` would have returned a classified
+  non-SUCCESS `LLMResult` -- by then HTTP 200 and some response body are already sent,
+  so an exception can't become an error status any more.
+- **Log `llm_usage` exactly once**, same as `generate()`. Otherwise streaming would be
+  a way to spend provider quota without it counting against the internal budget.
+- **No retries.** Once a delta has been sent it cannot be unsent, so retrying would
+  duplicate visible text. `AIRouter.route_stream` fails over instead -- but only while
+  nothing has been emitted yet. A provider that fails *after* emitting text ends the
+  turn with its own error rather than letting a second provider overwrite what the user
+  is already reading.
+
+`generate_stream` is optional on the `LLMProvider` protocol: `route_stream` falls back
+to buffering `generate()` into a single terminal chunk for any provider that lacks it,
+so such a provider stays fully usable and simply contributes no early text.

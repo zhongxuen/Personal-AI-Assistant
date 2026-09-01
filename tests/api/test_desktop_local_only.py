@@ -74,16 +74,22 @@ def client(test_db, monkeypatch):
         finally:
             db.close()
 
-    # Stub out AssistantCore.handle entirely -- these tests only care whether the
+    # Stub out AssistantCore entirely -- these tests only care whether the
     # local-only boundary (checked before AssistantCore is ever constructed) let the
     # request through, not what AssistantCore does with it. Without this, an
     # unrecognized message with an empty process-wide tool registry would fall
     # through to real classification/AIRouter, which is exactly what
     # tests/core/test_zero_llm.py's `no_network` fixture exists to prevent -- simplest
     # to just not reach that code path here at all.
+    #
+    # It must be `handle_async` that's patched, since that's what the route awaits
+    # (app/api/routes/assistant.py); patching the sync `handle` intercepts nothing and
+    # lets exactly the real network calls described above happen anyway.
+    async def _stub_handle_async(self, request):
+        return AssistantResponse(text="stub response")
+
     monkeypatch.setattr(
-        "app.api.routes.assistant.AssistantCore.handle",
-        lambda self, request: AssistantResponse(text="stub response"),
+        "app.api.routes.assistant.AssistantCore.handle_async", _stub_handle_async
     )
 
     # §34, file 12 prompt 1: platform="web" now also requires authentication --

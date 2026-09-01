@@ -61,6 +61,7 @@ Set these on the **backend host** (Render dashboard → service → Environment)
 |---|---|---|
 | `APP_ENV` | yes | `production` — silences the "still on dev DB defaults" assumptions and makes the insecure-`AUTH_SECRET_KEY` check actually fire. |
 | `CORS_ORIGINS` | yes | Exact deployed frontend origin, e.g. `https://personal-ai-assistant-goh-zhong-xuen-s-projects.vercel.app`. Comma-separate if there's more than one (e.g. a Vercel preview URL too). |
+| `ASSISTANT_TIMEZONE` | yes (deployed) | IANA name of **the user's** timezone, e.g. `Asia/Kuala_Lumpur`. Render containers run in UTC, so without this the assistant answers "what time is it" hours off (with a right-looking date) and parses "remind me tomorrow at 8pm" into the wrong zone. Pinned in `render.yaml`; the code default matches. Set to an empty value only for a desktop install, where the host clock *is* the user's clock. |
 | `AUTH_SECRET_KEY` | yes | Long random value, **not** the shipped dev default. Generate: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
 | `AUTH_SEED_USERNAME` / `AUTH_SEED_PASSWORD` | yes (or you can't log in) | One-time bootstrap user, created at startup if it doesn't already exist. |
 | `GEMINI_API_KEY` | yes, for LLM features | Unset → `GeminiProvider.is_available()` is `False`, not an error (deterministic tool routing still works). |

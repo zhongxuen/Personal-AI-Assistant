@@ -14,6 +14,7 @@ call in file 05) can treat them interchangeably.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -67,6 +68,37 @@ class LLMResult(BaseModel):
     status: LLMStatus
     error_type: str | None = None
     latency_ms: float = 0.0
+    # Which provider actually produced this result. Set by `AIRouter` once it knows
+    # which chain entry answered -- a provider doesn't set it on itself, since it has no
+    # way to know it was the one whose result got used. `AssistantCore` reports it as
+    # `AssistantResponse.provider`, which before this field existed was hardcoded to
+    # "gemini" and so mislabeled every reply the Ollama fallback actually served.
+    provider: str | None = None
+
+
+class LLMStreamChunk(BaseModel):
+    """One event from a *streaming* provider call (`LLMProvider.generate_stream`).
+
+    Exactly one of the two fields is meaningful per chunk:
+
+      - `delta` -- more generated text, to append to whatever arrived before it. Deltas
+        are incremental, never cumulative, so a consumer concatenates rather than
+        replaces.
+      - `final` -- the terminal, complete `LLMResult` for the whole call, including any
+        `tool_calls` and the token/latency accounting. Exactly one chunk carries this,
+        it is always the last one yielded, and it is yielded on failure too (with the
+        matching non-SUCCESS status) rather than the stream raising.
+
+    Streaming is deliberately expressed as "the same `LLMResult`, plus early partial
+    text" rather than a separate parallel result type: a caller that doesn't care about
+    incremental output can ignore every `delta` and use only `final`, and get exactly
+    what non-streaming `generate()` would have returned. That keeps `AssistantCore`'s
+    tool-execution path identical for both, instead of forking into a second
+    orchestration path (§41 Rule 7).
+    """
+
+    delta: str = ""
+    final: LLMResult | None = None
 
 
 @runtime_checkable
@@ -91,4 +123,20 @@ class LLMProvider(Protocol):
         provider's own `llm_usage` logging (see e.g. `GeminiProvider._log_usage`)
         records it correctly. Direct callers (unit tests, a provider exercised in
         isolation) get the default False."""
+        ...
+
+    def generate_stream(
+        self, request: LLMRequest, *, fallback_used: bool = False
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """Same call as `generate()`, but yielding text incrementally as the model
+        produces it -- see `LLMStreamChunk`. Must yield exactly one chunk with `final`
+        set, last, on success *and* on failure (a stream must not raise where
+        `generate()` would have returned a classified non-SUCCESS `LLMResult`), and must
+        log to `llm_usage` exactly once, same as `generate()`.
+
+        Optional in practice: `AIRouter.route_stream` checks for this attribute and
+        falls back to buffering `generate()` into a single terminal chunk for any
+        provider that doesn't implement it, so a provider whose SDK has no streaming
+        endpoint stays usable and simply doesn't produce early text.
+        """
         ...

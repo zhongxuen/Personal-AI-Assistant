@@ -265,7 +265,8 @@ def test_linked_user_run_routine_gets_the_exact_capability_rejection(
 # --- an unlinked number -------------------------------------------------------------------
 
 
-def test_unlinked_number_gets_the_link_reply_and_no_tool_is_executed(
+@pytest.mark.asyncio
+async def test_unlinked_number_gets_the_link_reply_and_no_tool_is_executed(
     linked_db, registry, executed, monkeypatch
 ):
     """An unrecognised number is stopped a layer *above* §22: it never becomes an
@@ -284,7 +285,7 @@ def test_unlinked_number_gets_the_link_reply_and_no_tool_is_executed(
     inbound = extract_inbound_message(payload)
     assert inbound is not None
 
-    outbound = webhook_module._build_outbound(payload, inbound, registry, HealthManager())
+    outbound = await webhook_module._build_outbound(payload, inbound, registry, HealthManager())
 
     assert outbound["to"] == UNLINKED_PHONE
     assert outbound["text"]["body"] == UNLINKED_REPLY
@@ -292,7 +293,8 @@ def test_unlinked_number_gets_the_link_reply_and_no_tool_is_executed(
     assert executed == []  # and so no tool call was attempted
 
 
-def test_unlinked_number_cannot_reach_a_desktop_tool_either(
+@pytest.mark.asyncio
+async def test_unlinked_number_cannot_reach_a_desktop_tool_either(
     linked_db, registry, executed, monkeypatch
 ):
     """The same guarantee for a message that *would* have been rejected by §22 anyway:
@@ -306,7 +308,7 @@ def test_unlinked_number_cannot_reach_a_desktop_tool_either(
     inbound = extract_inbound_message(payload)
     assert inbound is not None
 
-    outbound = webhook_module._build_outbound(payload, inbound, registry, HealthManager())
+    outbound = await webhook_module._build_outbound(payload, inbound, registry, HealthManager())
 
     assert outbound["text"]["body"] == UNLINKED_REPLY
     assert REJECTION not in outbound["text"]["body"]

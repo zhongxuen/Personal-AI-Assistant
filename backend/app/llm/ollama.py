@@ -29,6 +29,16 @@ Error classification (§5) mirrors Gemini's:
 QUOTA_EXHAUSTED is part of the shared `LLMStatus` taxonomy but realistically never
 returned here -- a local model has no request quota to exhaust.
 
+`generate_stream()` is the incremental form, over the same `/api/chat` endpoint with
+`"stream": true` (newline-delimited JSON, one object per token batch). It matters more
+here than on the Gemini side: this provider serves precisely the turns Gemini couldn't,
+and a local model on CPU regularly takes 15-20 seconds to produce a couple of sentences
+-- the slowest replies the assistant ever gives, and the ones where a motionless typing
+indicator is most likely to read as "it has hung". Unlike `_generate`, it does not
+retry: once a delta has been sent to the client it cannot be unsent, so a retry would
+duplicate visible text. `AIRouter.route_stream` fails over instead, which it can still
+do safely as long as nothing has been emitted yet.
+
 Tool/function-calling limitation: not every model Ollama can run supports tool
 calling. When a model doesn't, Ollama's `/api/chat` rejects a request that includes a
 `tools` payload with an HTTP 400 rather than silently ignoring it. `generate()`
@@ -44,14 +54,16 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
+import anyio.to_thread
 import httpx
 from sqlalchemy.orm import Session
 
 from app.config.settings import Settings, get_settings
 from app.database.models import LLMUsage
-from app.llm.base import LLMRequest, LLMResult, ToolCallRequest
+from app.llm.base import LLMRequest, LLMResult, LLMStreamChunk, ToolCallRequest
 
 logger = logging.getLogger(__name__)
 
@@ -220,10 +232,164 @@ class OllamaProvider:
         self._log_usage(result, fallback_used=fallback_used)
         return result
 
+    async def generate_stream(
+        self, request: LLMRequest, *, fallback_used: bool = False
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """Streaming counterpart to `generate()`, over Ollama's newline-delimited JSON
+        (`/api/chat` with `"stream": true`).
+
+        This matters more here than it does for Gemini, not less. Ollama is the fallback
+        that serves precisely the turns where Gemini was unavailable or out of budget,
+        and a local model on CPU regularly takes 15-20s to produce a couple of
+        sentences. Without streaming that is 15-20 seconds of a motionless typing
+        indicator on the slowest replies the assistant ever gives -- the exact case the
+        user is most likely to read as "it's broken".
+
+        Same contract as every streaming provider: exactly one terminal chunk, never
+        raises, logs `llm_usage` once. Like Gemini's, it doesn't retry -- once text has
+        been emitted a retry would duplicate it, and `AIRouter.route_stream` handles
+        pre-output failure by moving on.
+        """
+        start = time.monotonic()
+
+        unavailable_reason = await anyio.to_thread.run_sync(self._probe)
+        if unavailable_reason is not None:
+            result = LLMResult(
+                status="PERMANENT_ERROR",
+                error_type=unavailable_reason,
+                latency_ms=_elapsed_ms(start),
+            )
+            self._log_usage(result, fallback_used=fallback_used)
+            yield LLMStreamChunk(final=result)
+            return
+
+        payload = {**self._build_payload(request), "stream": True}
+        url = f"{self._settings.ollama_base_url}/api/chat"
+
+        text_parts: list[str] = []
+        tool_calls: list[ToolCallRequest] = []
+        request_tokens = 0
+        response_tokens = 0
+
+        try:
+            async with httpx.AsyncClient(timeout=self._settings.ollama_timeout_seconds) as client:
+                async with client.stream("POST", url, json=payload) as response:
+                    if response.status_code != 200:
+                        # The body hasn't been read yet on a streaming response, so it
+                        # has to be pulled in explicitly before it can be inspected.
+                        await response.aread()
+                        result = self._stream_error_result(response, payload, start)
+                        self._log_usage(result, fallback_used=fallback_used)
+                        yield LLMStreamChunk(final=result)
+                        return
+
+                    async for line in response.aiter_lines():
+                        if not line.strip():
+                            continue
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError:
+                            # A partial or malformed line is not worth ending the turn
+                            # over; the `done` object may still be coming.
+                            continue
+
+                        message = data.get("message") or {}
+                        for call in message.get("tool_calls") or []:
+                            name = (call.get("function") or {}).get("name") if isinstance(call, dict) else None
+                            if name:
+                                tool_calls.append(
+                                    ToolCallRequest(
+                                        tool_name=name,
+                                        params=dict((call["function"]).get("arguments") or {}),
+                                    )
+                                )
+
+                        delta = message.get("content") or ""
+                        if delta:
+                            text_parts.append(delta)
+                            yield LLMStreamChunk(delta=delta)
+
+                        if data.get("done"):
+                            # Token accounting only appears on the terminal object.
+                            request_tokens = data.get("prompt_eval_count") or 0
+                            response_tokens = data.get("eval_count") or 0
+        except httpx.TimeoutException:
+            result = LLMResult(
+                status="RETRYABLE_ERROR", error_type="timeout", latency_ms=_elapsed_ms(start)
+            )
+            self._log_usage(result, fallback_used=fallback_used)
+            yield LLMStreamChunk(final=result)
+            return
+        except Exception as exc:  # noqa: BLE001 -- transport failure mid-stream
+            logger.warning("Ollama streaming call failed: %s", exc, exc_info=True)
+            result = LLMResult(
+                status="RETRYABLE_ERROR",
+                error_type=f"stream_error:{type(exc).__name__}",
+                latency_ms=_elapsed_ms(start),
+            )
+            self._log_usage(result, fallback_used=fallback_used)
+            yield LLMStreamChunk(final=result)
+            return
+
+        result = LLMResult(
+            text="".join(text_parts),
+            tool_calls=tool_calls,
+            request_tokens=request_tokens,
+            response_tokens=response_tokens,
+            status="SUCCESS",
+            latency_ms=_elapsed_ms(start),
+        )
+        self._log_usage(result, fallback_used=fallback_used)
+        yield LLMStreamChunk(final=result)
+
+    def _stream_error_result(self, response, payload: dict[str, Any], start: float) -> LLMResult:
+        """Classify a non-200 from the streaming `/api/chat` call, matching
+        `_generate`'s taxonomy.
+
+        The tool-calling 400 that `_generate` recovers from by retrying without `tools`
+        is deliberately *not* retried here -- it's reported as RETRYABLE_ERROR so
+        `AIRouter.route_stream` can fail over cleanly. Nothing has been emitted at this
+        point (the status arrives before any body), so nothing is lost by that, and it
+        keeps this path free of a second, subtly different retry loop.
+        """
+        status_code = response.status_code
+        if status_code == 404:
+            return LLMResult(
+                status="PERMANENT_ERROR", error_type="model_not_found", latency_ms=_elapsed_ms(start)
+            )
+        if status_code == 400 and payload.get("tools") and "tool" in response.text.lower():
+            logger.info(
+                "Ollama model '%s' rejected tool calling on the streaming endpoint.",
+                self._settings.ollama_model,
+            )
+            return LLMResult(
+                status="RETRYABLE_ERROR",
+                error_type="tools_unsupported",
+                latency_ms=_elapsed_ms(start),
+            )
+        if 500 <= status_code < 600:
+            return LLMResult(
+                status="RETRYABLE_ERROR",
+                error_type=f"server_error_{status_code}",
+                latency_ms=_elapsed_ms(start),
+            )
+        return LLMResult(
+            status="PERMANENT_ERROR",
+            error_type=f"http_{status_code}",
+            latency_ms=_elapsed_ms(start),
+        )
+
     async def _generate(self, request: LLMRequest) -> LLMResult:
         start = time.monotonic()
 
-        unavailable_reason = self._probe()
+        # `_probe()` is deliberately still the *sync* `httpx.get` shared with
+        # `is_available()` (one definition of "available" for both, per its docstring),
+        # so it's run on a worker thread rather than called directly: this coroutine now
+        # runs on uvicorn's long-lived event loop (routes became `async def` for
+        # streaming), where a blocking call that can sit for
+        # `ollama_availability_timeout_seconds` would stall *every* other in-flight
+        # request, not just this one.
+        unavailable_reason = await anyio.to_thread.run_sync(self._probe)
         if unavailable_reason is not None:
             return LLMResult(
                 status="PERMANENT_ERROR",

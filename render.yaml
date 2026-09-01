@@ -25,6 +25,13 @@ services:
         value: production
       - key: LOG_LEVEL
         value: INFO
+      # Render's containers run in UTC, so the host clock is NOT the user's clock:
+      # without this, `get_time` answers "what time is it" hours off (right date,
+      # wrong time) and every "remind me tomorrow at 8pm" lands in the wrong zone.
+      # Pinned here rather than left to settings.py's default for the same reason
+      # GEMINI_MODEL is -- the deployed value should be reviewable in this file.
+      - key: ASSISTANT_TIMEZONE
+        value: Asia/Kuala_Lumpur
       # SQLite on the free plan's ephemeral disk -- resets on every deploy/restart.
       # Fine for a personal demo; see docs/deployment.md's persistence note before
       # relying on it for anything you can't afford to lose.

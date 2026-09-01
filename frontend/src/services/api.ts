@@ -5,7 +5,7 @@ import type { LLMUsageResponse, ProviderHealth } from '../types/llmUsage'
 import type { ActivityResponse } from '../types/activity'
 import type { ApplicationMapping, DefaultProject } from '../types/memory'
 import type { VoiceMessageResponse } from '../types/voice'
-import type { AssistantResponse } from '../types/assistant'
+import type { AssistantResponse, AssistantStreamEvent } from '../types/assistant'
 import type { DiscordStatus } from '../types/discord'
 import type { WhatsAppLinkCode, WhatsAppLinkStatus } from '../types/whatsapp'
 import type { DiagnosticCheck, DiagnosticsRunResult } from '../types/diagnostics'
@@ -491,4 +491,82 @@ export async function sendChatMessage(
   })
   await ensureOk(response, `Message failed: ${response.status}`)
   return response.json() as Promise<AssistantResponse>
+}
+
+/** POST /api/assistant/stream -- the same message, the same auth, the same final
+ * answer as `sendChatMessage` above, but delivered as Server-Sent Events so the reply
+ * can be rendered while it's still being generated.
+ *
+ * `onEvent` is called for every event in order; see `AssistantStreamEvent` for the
+ * taxonomy. The promise resolves when the stream ends normally and rejects on a
+ * transport/HTTP failure, so callers can keep their existing try/catch.
+ *
+ * Implemented over `fetch` + a `ReadableStream` reader rather than `EventSource`,
+ * because `EventSource` can only issue GETs and cannot send an `Authorization` header
+ * -- this endpoint needs both a JSON body and a bearer token.
+ *
+ * `signal` lets the caller abort in flight (component unmount, or a user starting a new
+ * message). Aborting closes the connection, which the server sees as a disconnect.
+ */
+export async function streamChatMessage(
+  message: string,
+  conversationId: string | undefined,
+  onEvent: (event: AssistantStreamEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/assistant/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify({
+      user_id: 'web-client',
+      platform: 'web',
+      message,
+      conversation_id: conversationId ?? null,
+    }),
+    signal,
+  })
+  await ensureOk(response, `Message failed: ${response.status}`)
+
+  if (!response.body) {
+    throw new Error('Streaming is not supported by this browser.')
+  }
+
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  // SSE frames are separated by a blank line, and a single read can land mid-frame or
+  // carry several frames at once -- so completed frames are peeled off the front and
+  // whatever partial text is left stays buffered for the next read.
+  let buffer = ''
+
+  try {
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+
+      let separator = buffer.indexOf('\n\n')
+      while (separator !== -1) {
+        const frame = buffer.slice(0, separator)
+        buffer = buffer.slice(separator + 2)
+        const payload = frame
+          .split('\n')
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice('data:'.length).trim())
+          .join('')
+        if (payload) {
+          try {
+            onEvent(JSON.parse(payload) as AssistantStreamEvent)
+          } catch {
+            // A frame we can't parse is not worth tearing the whole reply down over --
+            // the authoritative `done` event may still be on its way.
+          }
+        }
+        separator = buffer.indexOf('\n\n')
+      }
+    }
+  } finally {
+    // Releasing the lock lets the body be cancelled cleanly on an early return/abort
+    // instead of leaving the connection pinned open.
+    reader.releaseLock()
+  }
 }

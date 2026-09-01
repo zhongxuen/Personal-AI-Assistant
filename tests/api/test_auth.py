@@ -53,9 +53,15 @@ def client(test_db, monkeypatch):
     # boundary -- irrelevant to auth itself, but needed for the platform="desktop"
     # comparison test below to reach AssistantCore instead of 403ing first.
     monkeypatch.setattr("app.api.local_only.LOCAL_CLIENT_HOSTS", LOCAL_CLIENT_HOSTS | {"testclient"})
+    # `handle_async`, not `handle` -- the route awaits the async entrypoint (see
+    # app/api/routes/assistant.py). Stubbing the sync `handle` here silently stopped
+    # intercepting anything, and these tests went out to the real Gemini/Ollama
+    # endpoints and sat through their full retry/backoff budget.
+    async def _stub_handle_async(self, request):
+        return AssistantResponse(text="stub response")
+
     monkeypatch.setattr(
-        "app.api.routes.assistant.AssistantCore.handle",
-        lambda self, request: AssistantResponse(text="stub response"),
+        "app.api.routes.assistant.AssistantCore.handle_async", _stub_handle_async
     )
 
     app.dependency_overrides[get_db] = override_get_db

@@ -84,8 +84,11 @@ layer, ahead of `AssistantCore`/`ToolExecutor`: any request whose effective plat
 handler call happens. It's wired into every route that can execute a
 `platform="desktop"` request:
 
-- `POST /api/assistant/message` (`app/api/routes/assistant.py`) -- `platform` comes
-  from the request body, so the check runs conditionally on whatever value was sent.
+- `POST /api/assistant/message` and `POST /api/assistant/stream`
+  (`app/api/routes/assistant.py`) -- `platform` comes from the request body, so the
+  check runs conditionally on whatever value was sent. Both routes apply it through the
+  same `_authorize()` helper: the streaming endpoint is the same endpoint with a
+  different response encoding, and must never be a weaker door than the JSON one.
 - `POST /api/voice/message` (`app/api/routes/voice.py`) -- always builds a
   `platform="desktop"` request via `DesktopAdapter`, so the check runs unconditionally.
 
@@ -127,8 +130,9 @@ Every route that isn't part of the desktop-only local boundary above is a
   (`app/api/routes/tasks.py`, `routines.py`, `memory.py`, `llm_usage.py`), so every
   route on it requires a token unconditionally -- there's no route on these routers
   that's meant to be reachable without one.
-- `POST /api/assistant/message` when `request.platform != "desktop"` -- this one route
-  is genuinely mixed traffic (desktop *and* web/discord/mobile all funnel through it), so it
+- `POST /api/assistant/message` and `POST /api/assistant/stream` when
+  `request.platform != "desktop"` -- these routes are genuinely mixed traffic (desktop
+  *and* web/discord/mobile all funnel through them), so they
   can't use the same router-level `dependencies=[...]`: whether a token is required
   depends on the request *body*, which FastAPI dependencies can't see before they run.
   `app/api/routes/assistant.py` resolves the token via `get_optional_current_user`
@@ -138,7 +142,7 @@ Every route that isn't part of the desktop-only local boundary above is a
   client put in the request body -- a caller must not be able to claim to be a
   different user by editing the JSON.
 - `POST /api/voice/message` and any `platform="desktop"` call to
-  `/api/assistant/message` deliberately stay **outside** this layer -- they're gated
+  `/api/assistant/message` or `/api/assistant/stream` deliberately stay **outside** this layer -- they're gated
   solely by `enforce_desktop_local_only` above, per this task's own instruction to keep
   that a separate trust boundary rather than fold it into public auth.
 

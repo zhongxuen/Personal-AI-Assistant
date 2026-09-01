@@ -40,16 +40,17 @@ request-scoped `Depends(get_db)` session, because a request-scoped one is closed
 moment the ack is sent -- the same reason `app/platforms/discord.py`'s `on_message` opens
 its own, and the same convention as every module here that isn't handed a `db`.
 
-**No hop through `/api/assistant/message`.** `AssistantCore.handle()` is called directly,
-the server-side-adapter shape (`docs/architecture.md`'s "Two adapter shapes") Discord's
-bot event handler already uses. Routing through the shared HTTP route would mean
-inventing a bearer token for a caller that has none, purely to satisfy a boundary this
-route has already satisfied a different way.
+**No hop through `/api/assistant/message`.** `AssistantCore` is called directly, the
+server-side-adapter shape (`docs/architecture.md`'s "Two adapter shapes") Discord's bot
+event handler already uses. Routing through the shared HTTP route would mean inventing a
+bearer token for a caller that has none, purely to satisfy a boundary this route has
+already satisfied a different way.
 
-`AssistantCore.handle()` may call `asyncio.run()` internally (see
-`app/core/assistant.py`'s `_handle_needs_llm`), which raises inside a running event loop
--- so it is called through `asyncio.to_thread`, exactly as `on_message` does and for
-exactly the same reason.
+The background task awaits `AssistantCore.handle_async()` on the running loop. It
+previously called the sync `handle()` via `asyncio.to_thread`, because `handle()` reaches
+the LLM through `asyncio.run()`, which raises inside a running event loop -- the same
+detour `on_message` made, for the same reason, at the same cost: a throwaway event loop
+per message, and therefore a fresh TLS handshake to the LLM provider on every message.
 
 Three replies can come back to a WhatsApp sender, and only one of them runs a tool:
 an unlinked number gets `UNLINKED_REPLY`; the single message carrying a valid pairing
@@ -218,9 +219,7 @@ async def _process_inbound(
     there is no caller left to report it to.
     """
     try:
-        outbound = await asyncio.to_thread(
-            _build_outbound, payload, inbound, registry, health_manager
-        )
+        outbound = await _build_outbound(payload, inbound, registry, health_manager)
         await send_message(outbound)
     except Exception:
         logger.exception(
@@ -228,7 +227,7 @@ async def _process_inbound(
         )
 
 
-def _build_outbound(
+async def _build_outbound(
     payload: Any,
     inbound: InboundMessage,
     registry: ToolRegistry,
@@ -237,8 +236,14 @@ def _build_outbound(
     """The three-way branch from this module's docstring, resolved against its own
     session; returns the outbound Cloud API JSON to send.
 
-    Synchronous, and run via `asyncio.to_thread` -- `AssistantCore.handle()` may call
-    `asyncio.run()`, which raises on a thread that already has a running event loop.
+    Awaited on the running event loop. This used to be a sync function dispatched via
+    `asyncio.to_thread`, forced by `AssistantCore.handle()` reaching the LLM through
+    `asyncio.run()` (which raises on a thread that already has a running loop). That
+    detour cost a throwaway event loop per inbound message and, with it, a fresh TLS
+    handshake to the LLM provider -- pooled connections belong to the loop that opened
+    them. `handle_async` runs on uvicorn's long-lived loop instead and offloads its own
+    blocking work internally; the linking lookups left inline here are single indexed
+    SQLite reads.
 
     Takes both the whole `payload` (what the adapter translates) and the already-
     extracted `inbound` (the sender and raw text, which the linking branch needs *before*
@@ -268,5 +273,5 @@ def _build_outbound(
         # rather than built here, so provider cooldowns and quota state are the same ones
         # every other platform's requests move (see `app.api.dependencies`).
         core = AssistantCore(registry, db=db, health_manager=health_manager)
-        response: AssistantResponse = core.handle(assistant_request)
+        response: AssistantResponse = await core.handle_async(assistant_request)
         return adapter.to_platform_output(response, inbound.from_number)

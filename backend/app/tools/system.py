@@ -32,15 +32,24 @@ from typing import Any
 
 import psutil
 
+from app.core.clock import local_now_aware, timezone_label
 from app.core.permissions import PermissionLevel
 from app.tools.base import ToolResult
 
 
 class GetTimeTool:
-    """Reports the current local date/time. No params, always SAFE."""
+    """Reports the current date/time in the user's configured timezone (§30 --
+    `ASSISTANT_TIMEZONE`, not the host clock; see `app.core.clock`). No params, always
+    SAFE.
+    """
 
     name = "get_time"
-    description = "Get the current local date and time."
+    # Wording matters here: this string is what the LLM reads when deciding whether to
+    # call this tool instead of answering from its own (nonexistent) sense of time.
+    description = (
+        "Get the current date and time in the user's local timezone. Always call this "
+        "instead of guessing the time or date."
+    )
     parameters: dict[str, Any] = {"type": "object", "properties": {}, "required": []}
     permission = PermissionLevel.SAFE
     platforms = ["desktop", "web", "discord", "mobile", "whatsapp"]
@@ -51,12 +60,30 @@ class GetTimeTool:
     cacheable = False
 
     def handler(self, **kwargs: Any) -> ToolResult:
-        now = datetime.now()
+        # `app.core.clock`, never a bare `datetime.now()`: this tool answers "what
+        # time is it" for a *person*, and the machine it runs on is only that person's
+        # machine on a desktop install. Deployed, the host clock is UTC, and this
+        # reported an eight-hour-wrong time under a right-looking date.
+        # One clock read, used for both fields -- two reads could straddle a minute
+        # boundary and hand back a `message` and an `iso` that disagree.
+        now_aware = local_now_aware()
+        now = now_aware.replace(tzinfo=None)
+        # "%I" zero-pads to "05:16 PM"; nobody reads a clock out loud that way.
+        clock = now.strftime("%I:%M %p").lstrip("0")
+        zone = timezone_label()
         return ToolResult(
             success=True,
             data={
-                "message": f"It's currently {now.strftime('%I:%M %p on %A, %B %d, %Y')}.",
-                "iso": now.isoformat(),
+                # The zone is named in the answer so a wrong `ASSISTANT_TIMEZONE` shows
+                # up as an obviously wrong label rather than as a silently wrong number.
+                "message": (
+                    f"It's currently {clock} on {now.strftime('%A, %B %d, %Y')} "
+                    f"({zone})."
+                ),
+                # Offset-aware on purpose (unlike the naive value used for display and
+                # comparisons), so a machine reading this can tell which zone it's in.
+                "iso": now_aware.isoformat(),
+                "timezone": zone,
             },
         )
 

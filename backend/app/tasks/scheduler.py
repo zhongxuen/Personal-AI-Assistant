@@ -30,6 +30,7 @@ from datetime import datetime
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from app.core.clock import local_now
 from app.core.permissions import RequesterContext
 from app.core.tool_executor import ToolExecutor
 from app.database.database import SessionLocal
@@ -80,7 +81,13 @@ class ReminderScheduler:
         try:
             due_reminders = (
                 db.query(TaskReminder)
-                .filter(TaskReminder.sent.is_(False), TaskReminder.remind_at <= datetime.now())
+                # `local_now()`, not `datetime.now()`: `remind_at` is naive
+                # user-local (it comes from `parse_due`), so comparing it against
+                # the host clock fires every reminder in a deployed backend's UTC
+                # timezone -- hours early or late. `next_run_time` above stays on
+                # the real system clock: that one is APScheduler's own scheduling
+                # instant, not a user-facing wall clock.
+                .filter(TaskReminder.sent.is_(False), TaskReminder.remind_at <= local_now())
                 .all()
             )
             if not due_reminders:

@@ -6,17 +6,24 @@ Voice message route (§24, §25, file 10 prompt 2).
 instead of a JSON message body. It never re-implements command routing: the resulting
 transcript is handed to `app.platforms.desktop.DesktopAdapter.to_request()` -- the same
 platform-adapter translation file 02 built for turning platform-native input into an
-`AssistantRequest` -- and from there into the exact same `AssistantCore.handle()`
+`AssistantRequest` -- and from there into the exact same `AssistantCore` entrypoint
 every platform calls (§41 Rule 7). The response text is then optionally spoken back via
 `TextToSpeechProvider`.
 
-The route is defined `def`, not `async def`, on purpose: `AssistantCore.handle()` calls
-`asyncio.run(...)` internally on the LLM_REQUIRED path (see `app.core.assistant`), which
-raises if it's ever invoked from a thread that already has a running event loop. FastAPI
-runs sync `def` routes in a worker thread with no event loop of its own (the same reason
-`app.api.routes.assistant.post_message` is sync), so `audio.file.read()` (the
-`UploadFile`'s underlying `SpooledTemporaryFile`, read synchronously) is used here
-instead of `await audio.read()`.
+The route is `async def`, and calls `AssistantCore.handle_async()`. It used to be a sync
+`def` specifically because `AssistantCore.handle()` calls `asyncio.run(...)` on the
+LLM_REQUIRED path, which raises inside a thread that already has a running loop -- that
+constraint is gone now that `handle_async` exists. The switch is worth making rather
+than leaving alone: `asyncio.run` built a throwaway event loop per voice command, and an
+HTTP client's pooled connections die with the loop that opened them, so every spoken
+command re-paid a full TLS handshake to the LLM provider. Running on uvicorn's
+long-lived loop lets `app.llm.clients` keep that connection warm (see
+`AssistantCore.handle_async`).
+
+Everything genuinely blocking here is pushed to a worker thread rather than run inline,
+because on the shared loop it would otherwise stall every other in-flight request:
+`audio.file.read()` (the `UploadFile`'s underlying `SpooledTemporaryFile`),
+`stt.transcribe()` (a whisper inference pass, seconds on CPU), and `tts.synthesize()`.
 
 Two-step confirm flow lives behind this one endpoint, not two, driven by `dry_run`:
   1. The frontend records audio and POSTs it here with `dry_run=true` -- only STT runs,
@@ -25,7 +32,7 @@ Two-step confirm flow lives behind this one endpoint, not two, driven by `dry_ru
      misheard transcript (file 10 goal item 6).
   2. Once the user accepts (or edits) that transcript, the frontend POSTs again with
      `text=<that transcript>` and `dry_run=false` (no audio re-upload, no repeat STT
-     pass) to actually run it through `AssistantCore.handle()` and get a spoken reply.
+     pass) to actually run it through `AssistantCore` and get a spoken reply.
 `audio` and `text` are mutually exclusive entry points into the same pipeline -- exactly
 one of them must be provided on any given call.
 """
@@ -35,6 +42,7 @@ from __future__ import annotations
 import base64
 import logging
 
+import anyio.to_thread
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -69,7 +77,7 @@ class VoiceMessageResponse(BaseModel):
 
 
 @router.post("/voice/message", response_model=VoiceMessageResponse)
-def post_voice_message(
+async def post_voice_message(
     http_request: Request,
     audio: UploadFile | None = File(None),
     text: str | None = Form(None),
@@ -99,9 +107,9 @@ def post_voice_message(
         transcript = text.strip()
     else:
         assert audio is not None  # narrowed by the checks above
-        audio_bytes = audio.file.read()
+        audio_bytes = await anyio.to_thread.run_sync(audio.file.read)
         try:
-            transcript = stt.transcribe(audio_bytes).strip()
+            transcript = (await anyio.to_thread.run_sync(stt.transcribe, audio_bytes)).strip()
         except Exception as exc:  # STT errors are raised as plain exceptions (see app.voice.stt)
             logger.exception("STT transcription failed.")
             raise HTTPException(status_code=502, detail=f"Transcription failed: {exc}") from exc
@@ -110,7 +118,7 @@ def post_voice_message(
         raise HTTPException(status_code=422, detail="Nothing was transcribed from that audio.")
 
     if dry_run:
-        # STT-only preview -- AssistantCore.handle() is never called here, so this
+        # STT-only preview -- AssistantCore is never called here, so this
         # branch can't trigger a tool (deterministic or LLM) by itself. See module
         # docstring's two-step confirm flow.
         return VoiceMessageResponse(transcript=transcript)
@@ -131,13 +139,14 @@ def post_voice_message(
     )
 
     core = AssistantCore(registry, db=db, health_manager=health_manager)
-    response = core.handle(request)
+    response = await core.handle_async(request)
 
     audio_base64: str | None = None
     if speak and response.text:
         try:
             if tts.is_available():
-                audio_base64 = base64.b64encode(tts.synthesize(response.text)).decode("ascii")
+                spoken = await anyio.to_thread.run_sync(tts.synthesize, response.text)
+                audio_base64 = base64.b64encode(spoken).decode("ascii")
             else:
                 logger.info("TTS provider unavailable; returning a text-only voice response.")
         except Exception:

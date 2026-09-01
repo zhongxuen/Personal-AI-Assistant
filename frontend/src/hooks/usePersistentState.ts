@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useCallback, useState } from 'react'
 
 /** `useState` backed by `localStorage` under `key`, so in-progress UI state survives
  * both a manual browser refresh and Chrome discarding a background tab to reclaim
@@ -23,18 +23,26 @@ export function usePersistentState<T>(key: string, initialValue: T | (() => T)) 
     return initialValue instanceof Function ? initialValue() : initialValue
   })
 
-  function set(next: T | ((prev: T) => T)) {
-    setValue((prev) => {
-      const resolved = next instanceof Function ? next(prev) : next
-      try {
-        window.localStorage.setItem(key, JSON.stringify(resolved))
-      } catch {
-        // Quota exceeded or storage disabled -- state still updates in memory for this
-        // tab's lifetime, it just won't survive a refresh.
-      }
-      return resolved
-    })
-  }
+  // Memoized on `key` so the returned setter is referentially stable across renders,
+  // exactly like the plain `useState` setter it wraps. Without this it was a fresh
+  // function every render, which quietly makes it unusable as a `useEffect`/`useMemo`
+  // dependency: listing it re-runs the effect on every render, and omitting it trips
+  // exhaustive-deps and leaves the effect closing over a stale copy.
+  const set = useCallback(
+    (next: T | ((prev: T) => T)) => {
+      setValue((prev) => {
+        const resolved = next instanceof Function ? next(prev) : next
+        try {
+          window.localStorage.setItem(key, JSON.stringify(resolved))
+        } catch {
+          // Quota exceeded or storage disabled -- state still updates in memory for this
+          // tab's lifetime, it just won't survive a refresh.
+        }
+        return resolved
+      })
+    },
+    [key],
+  )
 
   return [value, set] as const
 }

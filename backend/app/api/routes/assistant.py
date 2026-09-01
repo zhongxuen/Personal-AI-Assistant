@@ -34,30 +34,40 @@ below.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import AsyncIterator
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_health_manager, get_optional_current_user, get_tool_registry
 from app.api.local_only import enforce_desktop_local_only
 from app.core.assistant import AssistantCore
-from app.core.models import AssistantRequest, AssistantResponse
+from app.core.models import AssistantRequest, AssistantResponse, AssistantStreamEvent
 from app.database.database import get_db
 from app.database.models import User
 from app.llm.health import HealthManager
 from app.tools.registry import ToolRegistry
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(tags=["assistant"])
 
 
-@router.post("/assistant/message", response_model=AssistantResponse)
-def post_message(
+def _authorize(
     request: AssistantRequest,
     http_request: Request,
-    db: Session = Depends(get_db),
-    registry: ToolRegistry = Depends(get_tool_registry),
-    health_manager: HealthManager = Depends(get_health_manager),
-    current_user: User | None = Depends(get_optional_current_user),
-) -> AssistantResponse:
+    current_user: User | None,
+) -> AssistantRequest:
+    """The two trust boundaries described in this module's docstring, applied in order,
+    returning the request with its `user_id` pinned to the authenticated identity for
+    every non-desktop platform.
+
+    Shared verbatim by both routes below -- the streaming endpoint is the same endpoint
+    with a different response encoding, so it must not get a weaker (or merely
+    different) boundary than the JSON one.
+    """
     # §23: this endpoint accepts any `platform`, including "desktop" -- reject a
     # claimed platform="desktop" that didn't actually arrive from this machine before
     # it ever reaches AssistantCore/ToolExecutor (which only re-check tool-level
@@ -85,9 +95,94 @@ def post_message(
             )
         request = request.model_copy(update={"user_id": current_user.username})
 
+    return request
+
+
+@router.post("/assistant/message", response_model=AssistantResponse)
+async def post_message(
+    request: AssistantRequest,
+    http_request: Request,
+    db: Session = Depends(get_db),
+    registry: ToolRegistry = Depends(get_tool_registry),
+    health_manager: HealthManager = Depends(get_health_manager),
+    current_user: User | None = Depends(get_optional_current_user),
+) -> AssistantResponse:
+    request = _authorize(request, http_request, current_user)
+
     # The process-wide HealthManager (not a fresh one per request) so provider
     # cooldowns/consecutive-error state actually persists across requests -- see
     # app.api.dependencies' docstring -- and so app.api.routes.llm_usage's status
     # dashboard reflects what AIRouter is really acting on.
     core = AssistantCore(registry, db=db, health_manager=health_manager)
-    return core.handle(request)
+    # `async def` + `handle_async` deliberately, not the sync `def` + `handle` this
+    # route used to be: `handle()` reaches the LLM via `asyncio.run()`, and an HTTP
+    # client's pooled connections die with the loop that opened them, so every message
+    # re-paid a full TLS handshake to the provider. Awaiting on uvicorn's own long-lived
+    # loop lets `app.llm.clients` keep the connection warm across requests. Blocking
+    # work inside (tool handlers, DB) is offloaded to threads by AssistantCore itself.
+    return await core.handle_async(request)
+
+
+@router.post("/assistant/stream")
+async def post_message_stream(
+    request: AssistantRequest,
+    http_request: Request,
+    db: Session = Depends(get_db),
+    registry: ToolRegistry = Depends(get_tool_registry),
+    health_manager: HealthManager = Depends(get_health_manager),
+    current_user: User | None = Depends(get_optional_current_user),
+) -> StreamingResponse:
+    """Server-Sent Events form of `/assistant/message` -- same body, same auth, same
+    orchestration, same final answer; the reply just arrives in pieces.
+
+    This is the single biggest perceived-latency win available: on the JSON endpoint the
+    user sees nothing at all until generation finishes, so time-to-first-character is
+    the whole turn. Here the first token lands as soon as the model emits it and the
+    rest streams in behind it.
+
+    Deliberately a *second* route rather than a replacement. Discord, WhatsApp, the
+    desktop agent and the mobile client all consume a single JSON body and have no use
+    for partial output; keeping `/assistant/message` exactly as it was means adding
+    streaming for the web chat costs those platforms nothing and breaks no existing
+    client (§41 Rule 7 -- one orchestrator, `AssistantCore`, rendered two ways).
+
+    Each event is one `AssistantStreamEvent` as JSON on a `data:` line. Consumers should
+    treat the `"done"` event's `response` as authoritative and everything before it as a
+    preview -- see `AssistantStreamEvent` for the event taxonomy and why there is no
+    separate error event.
+    """
+    request = _authorize(request, http_request, current_user)
+    core = AssistantCore(registry, db=db, health_manager=health_manager)
+
+    async def events() -> AsyncIterator[str]:
+        try:
+            async for event in core.handle_stream(request):
+                yield f"data: {event.model_dump_json()}\n\n"
+        except Exception:  # noqa: BLE001 -- a stream must not die with a bare socket close
+            # The response status is long since sent by the time anything in here can
+            # fail, so an exception can't become a 500 -- without this the client just
+            # sees the connection drop and has no idea whether the turn happened. Emit a
+            # well-formed terminal event instead, so the UI can report it like any other
+            # failed turn (§41 Rule 3).
+            logger.exception("Assistant stream failed mid-flight.")
+            failure = AssistantStreamEvent(
+                type="done",
+                response=AssistantResponse(
+                    text="Something went wrong while generating that reply. Please try again.",
+                    used_llm=False,
+                ),
+            )
+            yield f"data: {failure.model_dump_json()}\n\n"
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            # Nginx and several PaaS proxies (Render included) buffer responses by
+            # default, which would hold every chunk back until the stream closed and
+            # silently undo the entire point of this route.
+            "X-Accel-Buffering": "no",
+        },
+    )

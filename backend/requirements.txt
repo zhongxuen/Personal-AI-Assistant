@@ -17,3 +17,8 @@ PyJWT==2.10.1
 discord.py==2.4.0
 pywebpush==2.4.0
 httpx==0.28.1
+# Ships the IANA timezone database for `zoneinfo` (app/core/clock.py). Pulled in
+# transitively today, pinned explicitly because the app now depends on it directly --
+# without it, ZoneInfo("Asia/Kuala_Lumpur") raises on any host with no system tzdata
+# (notably Windows).
+tzdata==2026.3

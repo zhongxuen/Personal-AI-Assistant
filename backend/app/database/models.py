@@ -11,7 +11,7 @@ md-files/development-plan.md §26 and §41 Rule 1 (no over-engineering).
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -200,6 +200,16 @@ class LLMProvider(Base):
 
 class LLMUsage(Base):
     __tablename__ = "llm_usage"
+
+    # `QuotaManager.current_usage` runs a COUNT filtered on exactly (provider,
+    # timestamp) before *every* LLM call (app/llm/quota_manager.py) -- it is the
+    # pre-flight budget check `AIRouter` gates on, so it sits directly on the request
+    # hot path. Without this index SQLite answers it with a full table scan of a table
+    # that gains a row per LLM call and is never pruned, so the check gets steadily
+    # slower the longer the install has been in use. Column order matters: `provider`
+    # is the equality predicate and `timestamp` the range one, so it has to come first
+    # for the range to be satisfiable from the index.
+    __table_args__ = (Index("ix_llm_usage_provider_timestamp", "provider", "timestamp"),)
 
     id: Mapped[int] = _pk()
     provider: Mapped[str] = mapped_column(String(100), nullable=False)

@@ -33,7 +33,7 @@ from app.auth.service import AuthService
 from app.config.logging import configure_logging
 from app.config.settings import get_settings
 from app.database import models  # noqa: F401  (import registers models on Base.metadata)
-from app.database.database import Base, SessionLocal, engine
+from app.database.database import Base, SessionLocal, engine, ensure_indexes
 from app.platforms.discord import get_discord_bot_manager
 from app.routines.scheduler import RoutineScheduler
 from app.tasks.scheduler import ReminderScheduler
@@ -70,6 +70,10 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # migrate to Alembic migrations before any real data/production use
     # (tracked as tech debt in md-files/01-project-foundation.md).
     Base.metadata.create_all(bind=engine)
+    # ...and add any index a model has grown since this database was first created --
+    # create_all() only ever builds *missing tables*, so an index added later would
+    # otherwise reach new installs only. See `ensure_indexes`' docstring.
+    ensure_indexes()
     # Phase 2 (file 03): register the built-in deterministic tools against the
     # process-wide registry so every request routes against the full tool set. Also
     # seeds the "coding" routine as a persisted row the first time this runs (file 04

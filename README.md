@@ -41,6 +41,15 @@ npm install
 
 ## Running
 
+**Everything at once (Windows):** double-click `scripts\start-jarvis.cmd`, or run
+`.\scripts\start-jarvis.ps1` from any terminal. It starts the backend and the Vite dev
+server in their own console windows, waits for both ports, and opens the dashboard in
+your browser. Already-running services are detected by port and reused, so re-running it
+is harmless. Useful switches: `-BackendOnly` (API/Discord bot only), `-NoBrowser`,
+`-Reload` (uvicorn `--reload`). Stop it by closing the two console windows.
+
+The two commands it wraps, if you'd rather run them by hand:
+
 **Backend** (from `backend/`, with the venv active):
 
 ```bash

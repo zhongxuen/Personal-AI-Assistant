@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 
 import httpx
@@ -34,7 +35,8 @@ from sqlalchemy.orm import Session
 
 from app.config.settings import Settings, get_settings
 from app.database.models import LLMUsage
-from app.llm.base import LLMRequest, LLMResult, LLMStatus, ToolCallRequest
+from app.llm.base import LLMRequest, LLMResult, LLMStatus, LLMStreamChunk, ToolCallRequest
+from app.llm.clients import get_loop_client
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +72,21 @@ class GeminiProvider:
     def _get_client(self) -> Client:
         # Built lazily (not in __init__) so constructing a GeminiProvider never touches
         # the SDK when no key is configured -- is_available() stays a pure local check.
-        if self._client is None:
-            self._client = Client(api_key=self._settings.gemini_api_key)
-        return self._client
+        #
+        # The built client is cached per *event loop*, not on `self`: `AssistantCore`
+        # builds a fresh AIRouter -> ProviderManager -> GeminiProvider for every single
+        # request (see app.api.routes.assistant), so a client cached on the instance was
+        # in practice a brand new client -- and therefore a brand new connection pool,
+        # DNS lookup and TLS handshake -- on every message. See app.llm.clients for why
+        # the cache is keyed on the running loop rather than being one global client.
+        #
+        # `self._client` is still honored when set, so a test can inject a stub without
+        # ever reaching the real SDK (tests/llm/test_gemini_provider.py does exactly
+        # this), and so does an instance that was handed a client explicitly.
+        if self._client is not None:
+            return self._client
+        api_key = self._settings.gemini_api_key
+        return get_loop_client(f"gemini:{api_key}", lambda: Client(api_key=api_key))
 
     def _build_tools(self, tools: list[dict[str, Any]]) -> list[genai_types.Tool] | None:
         """Translate registered tool schemas into Gemini function-calling `Tool`s.
@@ -187,6 +201,109 @@ class GeminiProvider:
         result = await self._generate(request)
         self._log_usage(result, fallback_used=fallback_used)
         return result
+
+    async def generate_stream(
+        self, request: LLMRequest, *, fallback_used: bool = False
+    ) -> AsyncIterator[LLMStreamChunk]:
+        """Streaming counterpart to `generate()` -- yields text deltas as Gemini
+        produces them, then exactly one terminal `LLMStreamChunk(final=...)`.
+
+        This is what makes a reply *feel* fast: non-streaming, the user waits the full
+        generation time before seeing a single character, so time-to-first-token equals
+        total time. Streaming cuts perceived latency to the model's first chunk
+        (typically a few hundred ms) while total time is unchanged.
+
+        Error handling deliberately differs from `_generate`'s retry loop: retries only
+        apply *before* any output has been emitted. Once a delta has been sent to the
+        client there is no way to un-send it, so a mid-stream failure is classified and
+        returned as-is rather than restarted (which would duplicate the text already
+        rendered). A failure before the first delta still gets the normal
+        classification, it just isn't retried here -- `AIRouter.route_stream` fails over
+        to the next provider instead, which is the cheaper recovery at this point.
+        """
+        start = time.monotonic()
+
+        if not self.is_available():
+            result = LLMResult(
+                status="PERMANENT_ERROR",
+                error_type="missing_api_key",
+                latency_ms=_elapsed_ms(start),
+            )
+            self._log_usage(result, fallback_used=fallback_used)
+            yield LLMStreamChunk(final=result)
+            return
+
+        config = genai_types.GenerateContentConfig(
+            tools=self._build_tools(request.tools),
+            system_instruction=self._build_system_instruction(request.context),
+            http_options=genai_types.HttpOptions(
+                timeout=int(self._settings.gemini_timeout_seconds * 1000)
+            ),
+        )
+
+        text_parts: list[str] = []
+        tool_calls: list[ToolCallRequest] = []
+        request_tokens = 0
+        response_tokens = 0
+
+        try:
+            client = self._get_client()
+            stream = await client.aio.models.generate_content_stream(
+                model=self._settings.gemini_model,
+                contents=request.message,
+                config=config,
+            )
+            async for chunk in stream:
+                # Tool calls and usage metadata can both arrive on any chunk (usage
+                # typically only on the last), so every chunk is folded in rather than
+                # only reading the final one.
+                for call in chunk.function_calls or []:
+                    if call.name:
+                        tool_calls.append(
+                            ToolCallRequest(tool_name=call.name, params=dict(call.args or {}))
+                        )
+                if chunk.usage_metadata is not None:
+                    request_tokens = chunk.usage_metadata.prompt_token_count or request_tokens
+                    response_tokens = (
+                        chunk.usage_metadata.candidates_token_count or response_tokens
+                    )
+                # `.text` raises on a chunk carrying only function calls / no text part,
+                # so it's read defensively -- a chunk with nothing to show is normal
+                # mid-stream, not an error.
+                try:
+                    delta = chunk.text or ""
+                except Exception:  # noqa: BLE001 -- a text-less chunk is expected, not fatal
+                    delta = ""
+                if delta:
+                    text_parts.append(delta)
+                    yield LLMStreamChunk(delta=delta)
+        except genai_errors.ClientError as exc:
+            status, error_type = self._classify_client_error(exc)
+            result = LLMResult(status=status, error_type=error_type, latency_ms=_elapsed_ms(start))
+            self._log_usage(result, fallback_used=fallback_used)
+            yield LLMStreamChunk(final=result)
+            return
+        except Exception as exc:  # noqa: BLE001 -- transport/SDK failure mid-stream
+            logger.warning("Gemini streaming call failed: %s", exc, exc_info=True)
+            result = LLMResult(
+                status="RETRYABLE_ERROR",
+                error_type=f"stream_error:{type(exc).__name__}",
+                latency_ms=_elapsed_ms(start),
+            )
+            self._log_usage(result, fallback_used=fallback_used)
+            yield LLMStreamChunk(final=result)
+            return
+
+        result = LLMResult(
+            text="".join(text_parts),
+            tool_calls=tool_calls,
+            request_tokens=request_tokens,
+            response_tokens=response_tokens,
+            status="SUCCESS",
+            latency_ms=_elapsed_ms(start),
+        )
+        self._log_usage(result, fallback_used=fallback_used)
+        yield LLMStreamChunk(final=result)
 
     async def _generate(self, request: LLMRequest) -> LLMResult:
         start = time.monotonic()

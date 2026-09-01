@@ -111,6 +111,16 @@ Two adapter shapes exist today, and a new platform is usually closer to one or t
   through. Use this shape when the native input is already something a browser/HTTP client can
   produce directly — don't write a no-op server-side class just to satisfy the pattern.
 
+  The web chat actually calls `POST /api/assistant/stream`, the Server-Sent Events
+  sibling of that route: same request body, same auth boundary, same `AssistantCore`,
+  same final answer — the reply is just delivered in pieces so it can be rendered while
+  it's still being generated. It is deliberately a *second* route rather than a
+  replacement: Discord, WhatsApp, the desktop agent and the mobile client all consume a
+  single JSON body and have no use for partial output, so they keep using
+  `/api/assistant/message` unchanged. Its terminal `done` event carries exactly the
+  `AssistantResponse` the JSON route would have returned, which is what keeps one
+  orchestrator rendered two ways from becoming two orchestrators (§41 Rule 7).
+
 ### Concrete steps
 
 1. **Implement `to_request`/`to_platform_output` for the new native format.** Convert the

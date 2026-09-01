@@ -73,7 +73,13 @@ def _request(**metadata: Any) -> AssistantRequest:
 def test_unresolved_message_is_routed_to_gemini_provider():
     core, _restricted = _core_with_restricted_tool()
     core.ai_router.route = AsyncMock(
-        return_value=LLMResult(status="SUCCESS", text="a reasoned answer")
+        # `provider` is stamped by `AIRouter.route` from the chain entry that actually
+        # answered (app/llm/ai_router.py) -- mocking `route` itself bypasses that, so
+        # the stub has to supply it the same way the real router would. Asserting
+        # `response.provider` below is then a real check that AssistantCore reports
+        # whoever answered, rather than the hardcoded "gemini" it used to return
+        # regardless of whether Ollama was the one that served the reply.
+        return_value=LLMResult(status="SUCCESS", text="a reasoned answer", provider="gemini")
     )
 
     response = core.handle(_request())

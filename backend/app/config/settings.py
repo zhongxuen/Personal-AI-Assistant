@@ -26,6 +26,17 @@ class Settings(BaseSettings):
     app_env: str = "development"
     log_level: str = "INFO"
 
+    # IANA timezone name the assistant answers wall-clock questions in ("what time is
+    # it", "tomorrow at 8pm", "is this reminder due yet") -- see `app.core.clock`.
+    # This is the *user's* timezone, deliberately not the server's: the backend runs on
+    # Render in UTC, so leaving this to `datetime.now()` made `get_time` report 09:16
+    # to a user reading 17:16 on their own clock. Defaulted rather than left empty so a
+    # deploy that forgets to set it is still right for this app's one user; set it via
+    # env when that stops being true, or to "" to follow the host machine's clock (the
+    # right answer for a desktop-only install). An unrecognized name degrades to the
+    # host clock with a logged warning, never a crash.
+    assistant_timezone: str = "Asia/Kuala_Lumpur"
+
     api_host: str = "0.0.0.0"
     api_port: int = 8000
     cors_origins: str = "http://localhost:5173"
@@ -44,12 +55,27 @@ class Settings(BaseSettings):
     # set GEMINI_MODEL. Keep this default on a model the key can actually reach.
     gemini_api_key: str | None = None
     gemini_model: str = "gemini-3.6-flash"
-    gemini_timeout_seconds: float = 30.0
+    # A chat turn a person is actively waiting on. 30s was long enough that a stalled
+    # request looked identical to a hung app, and it multiplied: a timeout is a
+    # RETRYABLE_ERROR, so the old 30s x 3 attempts plus 1s + 2s of backoff let a single
+    # message sit for ~93 seconds before Gemini gave up and Ollama was even tried. A
+    # Flash-class model that hasn't produced a first token in 15s is not about to; give
+    # up sooner and spend the time on the fallback instead. Raise it via env for a
+    # deliberately slow model or a genuinely bad link.
+    gemini_timeout_seconds: float = 15.0
     # Retries apply only to RETRYABLE_ERROR (timeout/network/5xx) -- never
     # QUOTA_EXHAUSTED or PERMANENT_ERROR (§5). This is a *retry* count, so
     # gemini_max_retries=2 means up to 3 total attempts.
-    gemini_max_retries: int = 2
-    gemini_retry_base_delay_seconds: float = 1.0
+    #
+    # One retry, not two. The second retry existed to ride out a transient blip, but by
+    # then ~30s of the user's time is already gone and `OllamaProvider` -- a local model
+    # with no network in front of it -- is a better use of the next second than a third
+    # attempt at a service that has now failed twice. Failover is the retry.
+    gemini_max_retries: int = 1
+    # Backoff before that retry. Kept well under a second: this is dead time in front of
+    # a waiting user, and the failures it covers (a dropped connection, a brief 5xx) do
+    # not need a full second of politeness to clear.
+    gemini_retry_base_delay_seconds: float = 0.4
 
     # Ollama fallback (file 07). `ollama_model` must be a model actually pulled on the
     # local server -- OllamaProvider.is_available() checks this against the server's

@@ -1,8 +1,8 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { Bot, Send, User } from 'lucide-react'
-import { sendChatMessage } from '../services/api'
+import { streamChatMessage } from '../services/api'
 import type { AssistantToolCallResult } from '../types/assistant'
 import { Button, Input } from '../components/ui'
 import { cn } from '../components/ui/utils'
@@ -14,6 +14,11 @@ interface ChatMessage {
   usedLlm?: boolean
   provider?: string | null
   toolCalls?: AssistantToolCallResult[]
+  /** True while this reply is still arriving over the stream. Drives the in-bubble
+   * thinking dots and suppresses the "Reasoned (provider)" label, which isn't known
+   * until the terminal `done` event says which provider actually answered. Never
+   * persisted as true -- see the rehydration note in the component below. */
+  streaming?: boolean
 }
 
 /** A tool call whose result is a platform-capability rejection (§22) -- ToolExecutor's
@@ -25,13 +30,18 @@ function isCapabilityRejection(call: AssistantToolCallResult): boolean {
   return !call.result.success && (call.result.error?.includes("isn't available on") ?? false)
 }
 
-/** Web chat (§37 Phase 11, file 12 prompt 2) -- POSTs to the exact same
- * /api/assistant/message endpoint desktop/voice use, platform="web" (see
- * services/api.ts's sendChatMessage), so a message asking for a desktop-only tool
- * (e.g. "open vscode") comes back with the same §22 explanatory rejection any other
- * platform-capability check produces, not a silent no-op or an actual attempt to
- * control this machine -- there's nothing web-specific to gate here beyond just
- * sending the message and rendering whatever AssistantCore actually returns.
+/** Web chat (§37 Phase 11, file 12 prompt 2) -- POSTs platform="web" to
+ * /api/assistant/stream (see services/api.ts's streamChatMessage), the Server-Sent
+ * Events sibling of the /api/assistant/message endpoint desktop/voice use. Same
+ * AssistantCore, same tools, same final answer; the reply just arrives in pieces so it
+ * can be rendered while it's still being generated, instead of the whole turn elapsing
+ * behind a typing indicator.
+ *
+ * So a message asking for a desktop-only tool (e.g. "open vscode") still comes back
+ * with the same §22 explanatory rejection any other platform-capability check
+ * produces, not a silent no-op or an actual attempt to control this machine -- there's
+ * nothing web-specific to gate here beyond sending the message and rendering whatever
+ * AssistantCore actually returns.
  */
 export function ChatPage() {
   // Persisted (§ user report) so refreshing the page -- or Chrome discarding this tab
@@ -47,6 +57,23 @@ export function ChatPage() {
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // `messages` is persisted, so a reload (or Chrome discarding the tab) partway through
+  // a streamed reply would rehydrate a bubble still flagged `streaming` -- with no
+  // stream left to finish it, it would sit on the thinking dots forever. The in-flight
+  // request didn't survive the reload either way, so on mount any half-written reply is
+  // dropped and any flag left set is cleared.
+  useEffect(() => {
+    setMessages((prev) => {
+      if (!prev.some((message) => message.streaming)) return prev
+      return prev
+        .filter((message) => !(message.streaming && !message.text))
+        .map((message) => (message.streaming ? { ...message, streaming: false } : message))
+    })
+    // Mount-only: this repairs state restored from localStorage once, it isn't an
+    // invariant to maintain on every render. `setMessages` is stable (memoized in
+    // usePersistentState), so listing it doesn't reintroduce a re-run per render.
+  }, [setMessages])
+
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
     const text = input.trim()
@@ -57,20 +84,61 @@ export function ChatPage() {
     setSending(true)
     setError(null)
 
+    // The reply is streamed into this one placeholder bubble, appended up front and
+    // then mutated in place, so text appears as it's generated instead of after the
+    // whole turn completes. Its index is fixed the moment it's appended -- nothing else
+    // can append to `messages` while a send is in flight (the composer is disabled on
+    // `sending`), so a positional update is safe here.
+    let assistantIndex = -1
+    setMessages((prev) => {
+      assistantIndex = prev.length
+      return [...prev, { role: 'assistant', text: '', streaming: true }]
+    })
+
+    const updateAssistant = (patch: Partial<ChatMessage>) => {
+      setMessages((prev) =>
+        prev.map((message, index) =>
+          index === assistantIndex ? { ...message, ...patch } : message,
+        ),
+      )
+    }
+
     try {
-      const response = await sendChatMessage(text, conversationId)
-      setMessages((prev) => [
-        ...prev,
-        {
-          role: 'assistant',
-          text: response.text,
-          usedLlm: response.used_llm,
-          provider: response.provider,
-          toolCalls: response.tool_calls,
-        },
-      ])
+      let streamed = ''
+      await streamChatMessage(text, conversationId, (event) => {
+        if (event.type === 'delta') {
+          streamed += event.text
+          updateAssistant({ text: streamed })
+        } else if (event.type === 'tool' && event.tool_call) {
+          // Show each tool call the moment it finishes rather than all at once at the
+          // end -- on a turn that runs several, this is the only progress the user gets.
+          const call = event.tool_call
+          setMessages((prev) =>
+            prev.map((message, index) =>
+              index === assistantIndex
+                ? { ...message, toolCalls: [...(message.toolCalls ?? []), call] }
+                : message,
+            ),
+          )
+        } else if (event.type === 'done' && event.response) {
+          // `done` is authoritative -- replace the accumulated preview with it rather
+          // than keeping whatever the deltas happened to add up to. On a tool-only turn
+          // there were no deltas at all and this is the entire reply.
+          updateAssistant({
+            text: event.response.text,
+            usedLlm: event.response.used_llm,
+            provider: event.response.provider,
+            toolCalls: event.response.tool_calls,
+            streaming: false,
+          })
+        }
+      })
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send message.')
+      // Drop the placeholder rather than leave an empty assistant bubble behind -- the
+      // error is reported below the thread, and a blank bubble reads as a silent
+      // non-answer.
+      setMessages((prev) => prev.filter((_, index) => index !== assistantIndex))
     } finally {
       setSending(false)
     }
@@ -132,12 +200,33 @@ export function ChatPage() {
                       : 'border-primary/30 bg-gradient-to-br from-primary/15 to-primary/5',
                   )}
                 >
-                  {message.role === 'assistant' && (
+                  {/* Which path answered isn't known until the stream's terminal event,
+                      so the label is held back rather than guessed at and corrected. */}
+                  {message.role === 'assistant' && !message.streaming && (
                     <p className="mb-1 font-mono text-xs uppercase tracking-wide text-text-muted">
                       {message.usedLlm ? `Reasoned (${message.provider ?? 'LLM'})` : 'Direct command'}
                     </p>
                   )}
-                  <p className="whitespace-pre-wrap break-words">{message.text}</p>
+                  {message.streaming && !message.text ? (
+                    /* Thinking dots live inside the reply bubble now, so the bubble
+                       appears immediately and fills with text in place -- rather than a
+                       separate indicator that vanishes and is replaced by a different
+                       element once the reply lands. */
+                    <span className="flex items-center gap-1 py-1">
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
+                      <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary" />
+                    </span>
+                  ) : (
+                    <p className="whitespace-pre-wrap break-words">
+                      {message.text}
+                      {/* A blinking caret while text is still arriving, so a pause
+                          between chunks reads as "still generating" rather than "done". */}
+                      {message.streaming && (
+                        <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-primary/70 align-text-bottom" />
+                      )}
+                    </p>
+                  )}
                   {message.toolCalls?.map((call, callIndex) => (
                     <p
                       key={callIndex}
@@ -157,27 +246,10 @@ export function ChatPage() {
               </motion.div>
             ))}
 
-            {/* Typing/thinking indicator (§5) while awaiting the assistant's reply --
-                three bouncing dots in a bubble shaped like an assistant message. */}
-            {sending && (
-              <motion.div
-                key="typing-indicator"
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.2 }}
-                className="flex max-w-[92%] items-center gap-2 sm:max-w-[85%]"
-              >
-                <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-primary/50 bg-primary/10 text-primary">
-                  <Bot className="h-3.5 w-3.5" />
-                </div>
-                <div className="flex items-center gap-1 rounded-lg border border-primary/30 bg-gradient-to-br from-primary/15 to-primary/5 px-3 py-2.5 backdrop-blur-md">
-                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
-                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
-                  <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary" />
-                </div>
-              </motion.div>
-            )}
+            {/* The typing/thinking indicator (§5) that used to live here is now rendered
+                inside the assistant bubble itself -- the bubble is appended as soon as
+                the message is sent and fills with streamed text in place, so a separate
+                placeholder element would only flicker in and out ahead of it. */}
           </AnimatePresence>
         </div>
 
