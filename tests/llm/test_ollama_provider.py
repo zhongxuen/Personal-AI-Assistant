@@ -18,7 +18,7 @@ import pytest
 
 from app.config.settings import Settings
 from app.database.models import LLMUsage
-from app.llm.base import LLMRequest
+from app.llm.base import LLMRequest, ToolCallRequest, ToolExchange
 from app.llm.ollama import OllamaProvider
 
 
@@ -287,3 +287,29 @@ async def test_tool_calling_unsupported_falls_back_to_plain_text(monkeypatch):
     # First attempt included tools, the retry after the 400 dropped them.
     assert "tools" in posted[0]
     assert "tools" not in posted[1]
+
+
+def test_payload_carries_earlier_tool_results_and_drops_tools_on_a_text_only_step():
+    """A tool-loop turn can fail over to Ollama mid-loop. Ollama has no native
+    tool-result message, so earlier results ride along in the system context -- and on
+    the loop's final, text-only step no tools are offered at all."""
+    provider = OllamaProvider(settings=Settings(_env_file=None))
+    request = LLMRequest(
+        message="what's due?",
+        context={"platform": "web"},
+        tools=[{"name": "list_tasks", "parameters": {"type": "object", "properties": {}}}],
+        tool_exchanges=[
+            ToolExchange(
+                calls=[ToolCallRequest(tool_name="list_tasks", params={}, call_id="c1")],
+                outputs=['{"success": true, "data": {"count": 2}}'],
+                provider="openai",
+            )
+        ],
+        allow_tool_calls=False,
+    )
+
+    payload = provider._build_payload(request)
+
+    assert "tools" not in payload
+    system = payload["messages"][0]["content"]
+    assert "tool_results" in system and '\\"count\\": 2' in system

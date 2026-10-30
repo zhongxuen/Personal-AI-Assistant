@@ -59,13 +59,26 @@ class ProviderUsageOut(BaseModel):
     requests: int
     request_tokens: int
     response_tokens: int
+    # Input tokens served from the provider's prompt cache today (a subset of
+    # request_tokens) and estimated spend today -- 0 for providers that don't report
+    # them (only OpenAI does today).
+    cached_tokens: int
+    cost_usd: float
     failures: int
     fallback_count: int
-    # Today's internal request budget (`QuotaManager.budget_for`), or None when this
-    # provider is unmetered (e.g. Ollama -- local/free, no cloud quota to bar-chart).
-    # Powers the frontend's used/limit bar; `quota_status`/`status` alone can't since
-    # they only ever say NORMAL/WARNING/CRITICAL/FAILOVER, not the underlying numbers.
-    budget: int | None
+    # What the used/limit bar is measured in: "usd" (OpenAI's spend budget),
+    # "requests" (Gemini's request budget), or None when unmetered (Ollama -- local,
+    # free, nothing to bar-chart). `used`/`limit` are today's numbers in that unit,
+    # exactly what `QuotaManager` enforces; `limit` is None when unmetered.
+    unit: str | None
+    used: float
+    limit: float | None
+    # Same, for an optional monthly budget (OpenAI's `openai_monthly_budget_usd`);
+    # both None when no monthly budget is configured.
+    monthly_used: float | None = None
+    monthly_limit: float | None = None
+    # Kept for older clients: the same value as `limit`.
+    budget: float | None
     quota_status: str
     # The single badge value the frontend renders (NORMAL/WARNING/CRITICAL/FAILOVER,
     # §8/§39) -- `quota_status` downgraded to FAILOVER whenever HealthManager also
@@ -80,12 +93,14 @@ class LLMUsageResponse(BaseModel):
     providers: list[ProviderUsageOut]
 
 
-def _usage_row(db: Session, provider: str, since: datetime) -> dict[str, int]:
-    (requests, request_tokens, response_tokens, failures, fallback_count) = (
+def _usage_row(db: Session, provider: str, since: datetime) -> dict[str, int | float]:
+    (requests, request_tokens, response_tokens, cached_tokens, cost_usd, failures, fallback_count) = (
         db.query(
             func.count(LLMUsage.id),
             func.coalesce(func.sum(LLMUsage.request_tokens), 0),
             func.coalesce(func.sum(LLMUsage.response_tokens), 0),
+            func.coalesce(func.sum(LLMUsage.cached_tokens), 0),
+            func.coalesce(func.sum(LLMUsage.cost_usd), 0.0),
             func.coalesce(func.sum(case((LLMUsage.status != "SUCCESS", 1), else_=0)), 0),
             func.coalesce(func.sum(case((LLMUsage.fallback_used.is_(True), 1), else_=0)), 0),
         )
@@ -96,6 +111,8 @@ def _usage_row(db: Session, provider: str, since: datetime) -> dict[str, int]:
         "requests": int(requests or 0),
         "request_tokens": int(request_tokens or 0),
         "response_tokens": int(response_tokens or 0),
+        "cached_tokens": int(cached_tokens or 0),
+        "cost_usd": float(cost_usd or 0.0),
         "failures": int(failures or 0),
         "fallback_count": int(fallback_count or 0),
     }
@@ -136,11 +153,21 @@ def get_llm_usage(
         usage = _usage_row(db, name, since)
         health_status = health_manager.get_status(name)
         quota_status = quota_manager.status(name)
+        unit = quota_manager.unit_for(name)
+        limit = quota_manager.budget_for(name)
+        monthly_limit = quota_manager.monthly_budget_for(name)
         providers.append(
             ProviderUsageOut(
                 provider=name,
                 enabled=name in enabled_names,
-                budget=quota_manager.budget_for(name),
+                unit=unit,
+                # Unmetered: report the plain request count so the panel still has a
+                # number to show; metered: exactly what QuotaManager enforces.
+                used=quota_manager.current_usage(name) if unit else usage["requests"],
+                limit=limit,
+                monthly_used=quota_manager.monthly_usage(name) if monthly_limit is not None else None,
+                monthly_limit=monthly_limit,
+                budget=limit,
                 quota_status=quota_status,
                 status=_status_badge(quota_status, health_status.healthy),
                 health=ProviderHealthOut(

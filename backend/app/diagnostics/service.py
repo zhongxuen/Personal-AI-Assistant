@@ -40,6 +40,7 @@ from app.database.models import Routine, User
 from app.llm.gemini import GeminiProvider
 from app.llm.health import HealthManager
 from app.llm.ollama import OllamaProvider
+from app.llm.openai import OpenAIProvider
 from app.platforms.discord import DiscordBotManager
 from app.tools.registry import ToolRegistry
 from app.voice.stt import SpeechToTextProvider
@@ -98,8 +99,9 @@ class DiagnosticsService:
             ("database", "Database", self._check_database),
             ("tool_registry", "Tool registry", self._check_tool_registry),
             ("auth", "Auth (user account)", self._check_auth),
-            ("llm_gemini", "Gemini (LLM)", self._check_gemini),
+            ("llm_openai", "OpenAI (LLM)", self._check_openai),
             ("llm_ollama", "Ollama (LLM fallback)", self._check_ollama),
+            ("llm_gemini", "Gemini (LLM, opt-in)", self._check_gemini),
             ("voice_stt", "Speech-to-text", self._check_stt),
             ("voice_tts", "Text-to-speech", self._check_tts),
             ("discord_bot", "Discord bot", self._check_discord),
@@ -171,8 +173,28 @@ class DiagnosticsService:
             )
         return CheckResult("auth", "Auth (user account)", True, f"{count} user account(s).")
 
+    def _check_openai(self) -> CheckResult:
+        settings = get_settings()
+        label = "OpenAI (LLM)"
+        if not settings.openai_enabled:
+            return CheckResult("llm_openai", label, True, "Disabled (OPENAI_ENABLED=false).")
+        if not OpenAIProvider(settings=settings).is_available():
+            return CheckResult("llm_openai", label, False, "OPENAI_API_KEY isn't configured.")
+        message = f"API key configured, model '{settings.openai_model}'."
+        if self._health_manager is not None:
+            status = self._health_manager.get_status("openai")
+            message = f"{message} Live health: {status.state.value}."
+            if not status.healthy and status.last_error:
+                return CheckResult("llm_openai", label, False, f"{message} Last error: {status.last_error}")
+        return CheckResult("llm_openai", label, True, message)
+
     def _check_gemini(self) -> CheckResult:
         settings = get_settings()
+        if not settings.gemini_enabled:
+            # Off by default on purpose (free-tier data use) -- not a failure.
+            return CheckResult(
+                "llm_gemini", "Gemini (LLM, opt-in)", True, "Disabled (GEMINI_ENABLED=false)."
+            )
         provider = GeminiProvider(settings=settings)
         if not provider.is_available():
             return CheckResult(

@@ -10,6 +10,8 @@ dateparser==1.4.2
 APScheduler==3.11.3
 winotify==1.1.0
 google-genai==2.20.0
+# Primary LLM provider (app/llm/openai.py) -- Responses API, always store=False.
+openai==3.37.0
 faster-whisper==1.1.0
 pyttsx3==2.98
 pyperclip==1.9.0

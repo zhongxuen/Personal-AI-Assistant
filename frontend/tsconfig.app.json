@@ -22,5 +22,8 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Unit tests run under Node's own test runner (`npm test`), which needs Node types
+  // this browser-app config deliberately doesn't load.
+  "exclude": ["src/**/*.test.ts"]
 }

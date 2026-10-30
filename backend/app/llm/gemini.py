@@ -151,10 +151,9 @@ class GeminiProvider:
         # `response.function_calls` already collects every function call the SDK
         # parsed out of this one response (§12 call consolidation) -- when the model
         # asks for several tool calls in a single turn, they all land in this one list
-        # and `AssistantCore._handle_llm_success` executes all of them without ever
-        # calling back into Gemini per call. See that method's docstring for the
-        # round trip that *does* still remain (tool results aren't sent back for a
-        # second, synthesis generation call) -- not something the SDK gates here.
+        # and AssistantCore executes all of them without calling back into Gemini per
+        # call. Gemini has no tool-result loop (`supports_tool_loop` is unset), so
+        # those results are reported directly rather than sent back for a second call.
         tool_calls = [
             ToolCallRequest(tool_name=call.name, params=dict(call.args or {}))
             for call in (response.function_calls or [])
@@ -234,8 +233,8 @@ class GeminiProvider:
             return
 
         config = genai_types.GenerateContentConfig(
-            tools=self._build_tools(request.tools),
-            system_instruction=self._build_system_instruction(request.context),
+            tools=self._build_tools(request.tools_for_call()),
+            system_instruction=self._build_system_instruction(request.context_with_tool_results()),
             http_options=genai_types.HttpOptions(
                 timeout=int(self._settings.gemini_timeout_seconds * 1000)
             ),
@@ -316,8 +315,8 @@ class GeminiProvider:
             )
 
         config = genai_types.GenerateContentConfig(
-            tools=self._build_tools(request.tools),
-            system_instruction=self._build_system_instruction(request.context),
+            tools=self._build_tools(request.tools_for_call()),
+            system_instruction=self._build_system_instruction(request.context_with_tool_results()),
             http_options=genai_types.HttpOptions(
                 timeout=int(self._settings.gemini_timeout_seconds * 1000)
             ),

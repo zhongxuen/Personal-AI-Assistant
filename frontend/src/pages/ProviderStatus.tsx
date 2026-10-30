@@ -3,6 +3,7 @@ import { RefreshCw, RotateCcw } from 'lucide-react'
 import type { useLlmUsage } from '../hooks/useLlmUsage'
 import { resetProviderHealth } from '../services/api'
 import { LimitBar } from '../components/LimitBar'
+import { formatUsd, limitLabel } from '../components/limitFormat'
 import type { ProviderStatusBadge, ProviderUsage } from '../types/llmUsage'
 import type { BadgeTone } from '../components/ui'
 import { Badge, Button, Panel, PROVIDER_STATUS_TONE, Skeleton, StaggerItem, StaggerList } from '../components/ui'
@@ -117,22 +118,38 @@ function ProviderCard({ provider, onReset }: { provider: ProviderUsage; onReset:
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <span className="font-medium text-text">{provider.provider}</span>
-          {!provider.enabled && <Badge tone="neutral">not in chain</Badge>}
+          {!provider.enabled && <Badge tone="neutral">disabled</Badge>}
         </div>
-        <StatusBadge status={provider.status} />
+        {/* A disabled provider is never called, so a live quota badge would only
+            mislead -- the "disabled" pill above says everything there is to say. */}
+        {provider.enabled && <StatusBadge status={provider.status} />}
       </div>
 
-      <div className="mt-4">
+      <div className="mt-4 space-y-3">
         <LimitBar
-          label="Daily request budget"
-          used={provider.requests}
-          limit={provider.budget}
+          label={limitLabel(provider.unit)}
+          used={provider.used}
+          limit={provider.limit}
+          unit={provider.unit}
           status={provider.status}
+          enabled={provider.enabled}
         />
+        {provider.enabled && provider.monthly_limit !== null && (
+          <LimitBar
+            label="Monthly spend"
+            used={provider.monthly_used ?? 0}
+            limit={provider.monthly_limit}
+            unit={provider.unit}
+            status={provider.status}
+          />
+        )}
       </div>
 
       <div className="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3">
+        <Stat label="Requests" value={provider.requests} />
         <Stat label="Tokens (req/res)" value={`${provider.request_tokens} / ${provider.response_tokens}`} />
+        {provider.unit === 'usd' && <Stat label="Cached input tokens" value={provider.cached_tokens} />}
+        {provider.unit === 'usd' && <Stat label="Spend today" value={formatUsd(provider.cost_usd)} />}
         <Stat label="Failures" value={provider.failures} />
         <Stat label="Fallbacks" value={provider.fallback_count} />
       </div>
@@ -168,7 +185,8 @@ export function ProviderStatusPage({ llmUsage }: ProviderStatusPageProps) {
       <div className="mx-auto max-w-4xl">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <p className="text-sm text-text-muted">
-            Today's usage per LLM provider, plus each provider's live quota/health status.
+            Today's usage per LLM provider, plus each provider's live budget/health status.
+            OpenAI is metered by estimated spend (USD); Ollama runs locally and is unmetered.
           </p>
           <Button variant="ghost" onClick={refresh}>
             <RefreshCw className="h-4 w-4" />

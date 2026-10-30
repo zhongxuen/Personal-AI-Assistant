@@ -37,6 +37,11 @@ services:
       # relying on it for anything you can't afford to lose.
       - key: DATABASE_URL
         value: sqlite:///./jarvis.db
+      # Tells /api/health (and so the web app) that this server's conversations,
+      # memory and attachments are temporary. Render also sets RENDER=true, which
+      # auto-detects the same thing; this pins it explicitly.
+      - key: STORAGE_EPHEMERAL
+        value: "true"
       # The deployed frontend's exact origin (e.g. https://jarvis-xyz.vercel.app) --
       # set once the Vercel deploy's URL is known; see docs/deployment.md step order.
       - key: CORS_ORIGINS
@@ -51,9 +56,25 @@ services:
         sync: false
       - key: AUTH_SEED_PASSWORD
         sync: false
-      # Required for any Gemini call to succeed; GeminiProvider.is_available() is
-      # False (not an error) when unset. Never set VITE_-prefixed or otherwise ship
-      # this to the frontend -- see docs/deployment.md's secrets-boundary section.
+      # Primary LLM provider. Every request is sent with store=False (enforced in
+      # app/llm/openai.py). Use a restricted project key -- see docs/deployment.md.
+      # Never set VITE_-prefixed or otherwise ship this to the frontend.
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_ENABLED
+        value: "true"
+      # Pinned so the deployed model is reviewable here. Must be a model the key can
+      # use (404 -> PERMANENT_ERROR -> sticky MISCONFIGURED). Keep the
+      # OPENAI_*_PRICE_PER_MTOK settings in sync with this model's pricing.
+      - key: OPENAI_MODEL
+        value: gpt-5.4-mini
+      - key: OPENAI_DAILY_BUDGET_USD
+        value: "1.00"
+      # Gemini is opt-in only (free-tier data may be used by Google) -- kept out of
+      # the deployed chain. The key below is unused while this is false.
+      - key: GEMINI_ENABLED
+        value: "false"
+      # Only read when GEMINI_ENABLED=true. Never ship to the frontend.
       - key: GEMINI_API_KEY
         sync: false
       # Pinned explicitly rather than left to settings.py's default, so the deployed

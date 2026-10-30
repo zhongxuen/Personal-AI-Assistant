@@ -17,6 +17,9 @@ __pycache__/
 *.db
 *.sqlite3
 
+# Local-only user data (chat attachments, see app/attachments/service.py)
+backend/data/
+
 # Node / frontend
 node_modules/
 dist/
@@ -35,3 +38,6 @@ Thumbs.db
 
 .vercel
 .env*
+
+# Playwright MCP browser-session snapshots/logs
+.playwright-mcp/

@@ -31,6 +31,33 @@ def allowed_roots() -> list[Path]:
     return [Path(base).expanduser().resolve(strict=False) for base in settings.allowed_file_directories_list]
 
 
+def resolve_within(root: Path, relative: str) -> Path:
+    """Resolve `relative` against one fixed `root` and verify it stays inside it.
+
+    The same policy as `sanitize_path` below -- literal ".." rejected outright, then
+    full resolution (symlinks included) and a containment check -- but against a single
+    directory the caller owns (e.g. the attachments store) rather than the user-facing
+    file-tool allow-list. Also rejects absolute paths and drive/anchor-qualified ones,
+    which `Path.__truediv__` would otherwise let silently replace `root`.
+    """
+    if not relative or not relative.strip():
+        raise PathSafetyError("Path must not be empty.")
+    candidate = Path(relative)
+    if candidate.is_absolute() or candidate.anchor:
+        raise PathSafetyError(f"Path '{relative}' is not allowed: it must be relative.")
+    if ".." in candidate.parts:
+        raise PathSafetyError(f"Path '{relative}' is not allowed: '..' traversal is rejected.")
+
+    resolved_root = root.expanduser().resolve(strict=False)
+    try:
+        resolved = (resolved_root / candidate).resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise PathSafetyError(f"Could not resolve path '{relative}': {exc}") from exc
+    if resolved == resolved_root or resolved_root not in resolved.parents:
+        raise PathSafetyError(f"Path '{relative}' is outside {resolved_root}.")
+    return resolved
+
+
 def sanitize_path(raw_path: str) -> Path:
     """Resolve `raw_path` and verify it falls within an allow-listed base directory.
 

@@ -16,6 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.dependencies import get_tool_registry
 from app.api.routes.activity import router as activity_router
 from app.api.routes.assistant import router as assistant_router
+from app.api.routes.attachments import router as attachments_router
 from app.api.routes.auth import router as auth_router
 from app.api.routes.diagnostics import router as diagnostics_router
 from app.api.routes.discord import router as discord_router
@@ -33,7 +34,7 @@ from app.auth.service import AuthService
 from app.config.logging import configure_logging
 from app.config.settings import get_settings
 from app.database import models  # noqa: F401  (import registers models on Base.metadata)
-from app.database.database import Base, SessionLocal, engine, ensure_indexes
+from app.database.database import Base, SessionLocal, engine, ensure_columns, ensure_indexes
 from app.platforms.discord import get_discord_bot_manager
 from app.routines.scheduler import RoutineScheduler
 from app.tasks.scheduler import ReminderScheduler
@@ -70,6 +71,11 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # migrate to Alembic migrations before any real data/production use
     # (tracked as tech debt in md-files/01-project-foundation.md).
     Base.metadata.create_all(bind=engine)
+    # ...plus any nullable column a model has grown since (e.g. llm_usage.cost_usd) --
+    # see `ensure_columns`' docstring for why this is safe to run every startup.
+    added_columns = ensure_columns()
+    if added_columns:
+        logger.info("Added missing column(s): %s", ", ".join(added_columns))
     # ...and add any index a model has grown since this database was first created --
     # create_all() only ever builds *missing tables*, so an index added later would
     # otherwise reach new installs only. See `ensure_indexes`' docstring.
@@ -126,6 +132,7 @@ app.include_router(health_router, prefix="/api")
 app.include_router(activity_router, prefix="/api")
 app.include_router(auth_router, prefix="/api")
 app.include_router(assistant_router, prefix="/api")
+app.include_router(attachments_router, prefix="/api")
 app.include_router(tasks_router, prefix="/api")
 app.include_router(routines_router, prefix="/api")
 app.include_router(llm_usage_router, prefix="/api")

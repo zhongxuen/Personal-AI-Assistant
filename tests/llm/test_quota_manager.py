@@ -146,3 +146,81 @@ def test_unmetered_provider_is_always_normal_and_within_budget(test_db):
 
     assert manager.status("ollama") == "NORMAL"
     assert manager.within_budget("ollama") is True
+
+
+# --- USD-metered providers (OpenAI) ---------------------------------------------------
+
+
+def _add_cost_rows(session, *, costs: list[float], provider: str = "openai", timestamp: datetime | None = None) -> None:
+    for cost in costs:
+        row = LLMUsage(provider=provider, model="gpt-test", status="SUCCESS", cost_usd=cost)
+        session.add(row)
+        session.flush()
+        if timestamp is not None:
+            row.timestamp = timestamp
+    session.commit()
+
+
+def _usd_settings(**overrides) -> Settings:
+    defaults: dict = dict(
+        openai_daily_budget_usd=1.00,
+        openai_monthly_budget_usd=None,
+        openai_warning_threshold=0.80,
+        openai_critical_threshold=0.90,
+    )
+    defaults.update(overrides)
+    return Settings(_env_file=None, **defaults)
+
+
+def test_openai_is_metered_in_usd_and_gemini_in_requests():
+    manager = QuotaManager(settings=_usd_settings(), db=None)
+
+    assert manager.unit_for("openai") == "usd"
+    assert manager.budget_for("openai") == 1.00
+    assert manager.unit_for("gemini") == "requests"
+    assert manager.unit_for("ollama") is None
+    assert manager.budget_for("ollama") is None
+
+
+def test_usd_usage_sums_todays_cost_only(test_db):
+    session = test_db()
+    _add_cost_rows(session, costs=[0.10, 0.25])
+    _add_cost_rows(session, costs=[5.0], timestamp=datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=1))
+    _add_cost_rows(session, costs=[9.0], provider="gemini")
+
+    manager = QuotaManager(settings=_usd_settings(), db=session)
+
+    assert manager.current_usage("openai") == pytest.approx(0.35)
+
+
+@pytest.mark.parametrize(
+    ("spent", "expected"),
+    [(0.10, "NORMAL"), (0.80, "WARNING"), (0.95, "CRITICAL"), (1.00, "FAILOVER"), (1.50, "FAILOVER")],
+)
+def test_usd_thresholds(test_db, spent, expected):
+    session = test_db()
+    _add_cost_rows(session, costs=[spent])
+
+    manager = QuotaManager(settings=_usd_settings(), db=session)
+
+    assert manager.status("openai") == expected
+    assert manager.within_budget("openai") is (expected != "FAILOVER")
+
+
+def test_monthly_budget_can_trip_failover_even_with_daily_headroom(test_db):
+    session = test_db()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    _add_cost_rows(session, costs=[0.10])
+    # Earlier this month (not today) -- only the monthly window sees it. On the 1st of a
+    # month there is no "earlier this month", so the spend is put in today instead.
+    earlier = now.replace(day=1, hour=0, minute=0, second=1) if now.day > 1 else now
+    _add_cost_rows(session, costs=[4.95 if now.day > 1 else 0.0], timestamp=earlier)
+
+    manager = QuotaManager(settings=_usd_settings(openai_daily_budget_usd=1.0, openai_monthly_budget_usd=5.0), db=session)
+
+    if now.day > 1:
+        assert manager.current_usage("openai") == pytest.approx(0.10)
+        assert manager.monthly_usage("openai") == pytest.approx(5.05)
+        assert manager.status("openai") == "FAILOVER"
+    else:  # pragma: no cover -- calendar-dependent branch
+        assert manager.status("openai") == "NORMAL"

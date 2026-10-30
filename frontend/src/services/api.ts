@@ -6,6 +6,7 @@ import type { ActivityResponse } from '../types/activity'
 import type { ApplicationMapping, DefaultProject } from '../types/memory'
 import type { VoiceMessageResponse } from '../types/voice'
 import type { AssistantResponse, AssistantStreamEvent } from '../types/assistant'
+import type { Attachment } from '../types/attachment'
 import type { DiscordStatus } from '../types/discord'
 import type { WhatsAppLinkCode, WhatsAppLinkStatus } from '../types/whatsapp'
 import type { DiagnosticCheck, DiagnosticsRunResult } from '../types/diagnostics'
@@ -478,6 +479,7 @@ export async function setDefaultProject(defaultProject: string): Promise<Default
 export async function sendChatMessage(
   message: string,
   conversationId: string | undefined,
+  attachmentIds: number[] = [],
 ): Promise<AssistantResponse> {
   const response = await fetch(`${API_BASE_URL}/api/assistant/message`, {
     method: 'POST',
@@ -487,6 +489,7 @@ export async function sendChatMessage(
       platform: 'web',
       message,
       conversation_id: conversationId ?? null,
+      attachment_ids: attachmentIds,
     }),
   })
   await ensureOk(response, `Message failed: ${response.status}`)
@@ -513,6 +516,7 @@ export async function streamChatMessage(
   conversationId: string | undefined,
   onEvent: (event: AssistantStreamEvent) => void,
   signal?: AbortSignal,
+  attachmentIds: number[] = [],
 ): Promise<void> {
   const response = await fetch(`${API_BASE_URL}/api/assistant/stream`, {
     method: 'POST',
@@ -522,6 +526,7 @@ export async function streamChatMessage(
       platform: 'web',
       message,
       conversation_id: conversationId ?? null,
+      attachment_ids: attachmentIds,
     }),
     signal,
   })
@@ -569,4 +574,40 @@ export async function streamChatMessage(
     // instead of leaving the connection pinned open.
     reader.releaseLock()
   }
+}
+
+// --- Attachments ----------------------------------------------------------------------
+//
+// Files are stored on the disk of whichever backend this client talks to -- the desktop
+// install keeps them, the deployed (ephemeral) backend loses them on restart. They are
+// only ever sent to the LLM provider inline, for the one message that references them.
+
+/** POST /api/attachments (multipart). The backend allows pdf, txt, md and common image
+ * types, checks the contents match the extension, and enforces a size cap -- a rejected
+ * file throws with the backend's reason. */
+export async function uploadAttachment(file: File): Promise<Attachment> {
+  const body = new FormData()
+  body.append('file', file)
+  // No Content-Type header: the browser sets the multipart boundary itself.
+  const response = await fetch(`${API_BASE_URL}/api/attachments`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body,
+  })
+  await ensureOk(response, `Upload failed: ${response.status}`)
+  return response.json() as Promise<Attachment>
+}
+
+export async function listAttachments(): Promise<Attachment[]> {
+  const response = await fetch(`${API_BASE_URL}/api/attachments`, { headers: authHeaders() })
+  await ensureOk(response, `Failed to load attachments: ${response.status}`)
+  return response.json() as Promise<Attachment[]>
+}
+
+export async function deleteAttachment(id: number): Promise<void> {
+  const response = await fetch(`${API_BASE_URL}/api/attachments/${id}`, {
+    method: 'DELETE',
+    headers: authHeaders(),
+  })
+  await ensureOk(response, `Failed to delete attachment: ${response.status}`)
 }

@@ -11,7 +11,7 @@ md-files/development-plan.md §26 and §41 Rule 1 (no over-engineering).
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -221,6 +221,14 @@ class LLMUsage(Base):
     error_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
     latency: Mapped[int | None] = mapped_column(Integer, nullable=True)
     fallback_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Added after the table first shipped, so both are nullable -- `ensure_columns`
+    # (app/database/database.py) adds them to an existing database at startup, and
+    # rows written before then simply have NULL. `cached_tokens` is the part of
+    # `request_tokens` served from the provider's prompt cache; `cost_usd` is the
+    # estimated spend for the call (OpenAI only -- see `QuotaManager`'s USD budget).
+    # Providers that don't report either leave them NULL.
+    cached_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class ToolExecutionLog(Base):
@@ -270,4 +278,28 @@ class PushSubscription(Base):
     endpoint: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     keys_p256dh: Mapped[str] = mapped_column(String(255), nullable=False)
     keys_auth: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = _created_at()
+
+
+class Attachment(Base):
+    """A file a user uploaded for the assistant to read (`POST /api/attachments`).
+
+    The bytes live on the local disk of the machine running this backend, under
+    `settings.attachments_path` with a random server-chosen name (`path`) --
+    the user's original `filename` is kept here for display only and never becomes
+    part of a filesystem path. `path` is relative to `settings.attachments_path`, so
+    the directory can move without rewriting rows. Nothing is uploaded to any provider: when a chat turn
+    references an attachment, `AssistantCore` reads it from disk and the provider
+    sends it inline for that one request.
+    """
+
+    __tablename__ = "attachments"
+
+    id: Mapped[int] = _pk()
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    path: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
     created_at: Mapped[datetime] = _created_at()

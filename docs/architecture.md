@@ -4,6 +4,77 @@ TBD — filled in as Phases 1–2 (AssistantCore, CommandRouter, ToolExecutor) a
 (AI Router) land. See `md-files/00-overview-and-architecture.md` for the target diagram in the
 meantime.
 
+## LLM provider chain
+
+`AssistantCore` hands anything `CommandRouter` can't resolve deterministically to
+`AIRouter` (`backend/app/llm/ai_router.py`), which walks `ProviderManager`'s chain in
+priority order, skipping a provider that's disabled, over budget (`QuotaManager`) or
+unhealthy (`HealthManager`), and failing over on any non-SUCCESS result:
+
+```
+AssistantCore ──> AIRouter ──> 1. OpenAI   (primary; Responses API, store=False)
+                               2. Ollama   (local fallback; nothing leaves the machine)
+                               3. Gemini   (opt-in, GEMINI_ENABLED=false by default)
+```
+
+Gemini sits last and off because its free tier lets Google use submitted content to
+improve its products — it must never be a turn's *silent* failover target. OpenAI is
+metered by estimated **spend** (USD, from token counts × configured prices — see
+`QuotaManager`), Gemini by request count, Ollama not at all. Per-provider details:
+[`docs/llm-providers.md`](llm-providers.md).
+
+**OpenAI privacy invariants** (enforced in `backend/app/llm/openai.py`, tested in
+`tests/llm/test_openai_privacy.py`): every request carries `store=False`, built in one
+helper and sent through one other that refuses anything else; nothing server-side is
+referenced across requests (no `previous_response_id`, Conversations, Files, vector
+stores, Assistants or background mode); attachments are inline base64; `metadata` is
+never set. The prompt is laid out static-first for automatic prompt caching: fixed
+instructions → tools → per-request context → recent turns → the user's message.
+
+## Tool-result loop
+
+When the model asks for tools, `AssistantCore` runs them through `ToolExecutor` (the
+same validation/permission/platform/logging path as a deterministic command — §41
+Rule 6) and, if the provider that answered supports it (`supports_tool_loop`, OpenAI
+only), sends the results back as `function_call_output` items so the model answers from
+what actually happened:
+
+```
+step 0: AIRouter.route(request) ──> tool calls ──> ToolExecutor ──> results
+step 1: AIRouter.route(request + step-0 calls/results) ──> more calls? ... or text
+  ...
+step N (= LLM_MAX_TOOL_STEPS, default 4): tool calls disallowed ──> text reply
+```
+
+- Every step goes through `AIRouter`, so quota/health gating and failover apply per
+  step. A reasoning model's encrypted reasoning items are carried between steps by us
+  (`include=["reasoning.encrypted_content"]`), so the loop needs no server-side state.
+- A provider without tool-loop support (Ollama, Gemini) keeps the original single-shot
+  behavior: its tool calls run once and their results are the reply. If a turn fails
+  over to one mid-loop, the earlier results reach it as `tool_results` in its context.
+- If a later step fails entirely, the tools that already ran are still reported.
+- Streaming (`/api/assistant/stream`) emits a `tool` event as each call finishes and
+  streams each step's text; the terminal `done` event carries the final step's reply,
+  identical to what the JSON endpoint returns.
+
+## Storage model: local-only
+
+All conversations, memory and attachments are stored on the machine running the
+backend — SQLite (`DATABASE_URL`) plus `backend/data/attachments/` — and nowhere else:
+no cloud store, no sync, nothing retained by OpenAI. Attachments
+(`POST/GET/DELETE /api/attachments`, `backend/app/attachments/service.py`) are written
+under random names after a content-based type check and size cap, every path goes
+through `app.tools.path_safety.resolve_within`, and a chat turn that references one
+reads it from disk and sends it inline for that request only.
+
+`/api/health` reports `storage_mode`: `"local-durable"` on a desktop install,
+`"ephemeral"` on Render (whose free disk is wiped on restart/redeploy). The web app
+shows the cross-device limitation on the Settings page and, against an ephemeral
+backend, as a dismissible chat banner: data made through the deployed site is temporary
+and never reaches the desktop install. New nullable columns (e.g. `llm_usage.cost_usd`)
+reach existing databases through `ensure_columns()` at startup — a stopgap for the lack
+of migrations, limited to adding nullable columns.
+
 ## Persistence choices
 
 **Routines (`md-files/04-task-and-routine-system.md` §3):** routines are stored in the database
@@ -49,9 +120,9 @@ JARVIS
           |
        AI Router
           |
-     +----+----+
-     |         |
-  Gemini    Ollama
+     +----+----+---------+
+     |         |         |
+  OpenAI    Ollama    Gemini (opt-in)
 ```
 
 Nothing built here forecloses that split — it's the reason the boundary was drawn as a *tool*
@@ -72,9 +143,10 @@ the split would run along:
   Agent (authenticated per-client, replacing `app.api.local_only`'s current loopback-address
   check — that module's docstring already flags this as the thing to replace, not widen, once a
   real remote caller exists) instead of calling the Python handler directly in-process.
-- `AIRouter`/Gemini/Ollama stay reachable from Cloud Core only, same as today — Desktop Agent
-  would never hold `GEMINI_API_KEY` itself, consistent with the secrets boundary in
-  `docs/deployment.md`.
+- `AIRouter` and its providers stay reachable from Cloud Core only, same as today — Desktop
+  Agent would never hold `OPENAI_API_KEY`/`GEMINI_API_KEY` itself, consistent with the
+  secrets boundary in `docs/deployment.md`. (Note this split would also have to decide where
+  the local-only data store lives — today it's whichever machine runs the backend.)
 
 This is *not* built now — today's deployment is still the one-process shape above, and the
 desktop-only tools simply sit dormant (never reachable) on the Render deployment. The split is

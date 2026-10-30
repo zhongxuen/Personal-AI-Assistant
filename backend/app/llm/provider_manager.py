@@ -6,12 +6,19 @@ request -- this module is where that chain is assembled and owned. `AIRouter` it
 never hardcodes provider names/order/priority; it only asks `get_chain()` for whatever
 is currently enabled, in priority order, and tries each in turn.
 
-Two providers are registered: `GeminiProvider` at priority 1, `OllamaProvider` at
-priority 2 as its local fallback. Each has its own `*_enabled` settings flag
-(`ollama_enabled`, default True) an operator can use to pull it out of the chain
-entirely without touching code -- distinct from `is_available()`, which each provider
-still checks per-request regardless of `enabled`. Adding a third provider is the same
-shape: one more `ProviderEntry` here, no changes to `AIRouter`'s chain-walking logic.
+Three providers are registered:
+
+  1. `OpenAIProvider` -- primary. Every request is sent with store=False (see
+     `app.llm.openai`), so nothing is retained on OpenAI.
+  2. `OllamaProvider` -- local fallback; nothing leaves the machine at all.
+  3. `GeminiProvider` -- last, and **off by default** (`gemini_enabled=False`). The
+     free Gemini tier lets Google use submitted content to improve its products, so
+     it must never be something a turn silently fails over to; an operator opts in.
+
+Each has its own `*_enabled` settings flag an operator can use to pull it out of the
+chain entirely without touching code -- distinct from `is_available()`, which each
+provider still checks per-request regardless of `enabled`. Adding another provider is
+the same shape: one more `ProviderEntry` here, no changes to `AIRouter`.
 """
 
 from __future__ import annotations
@@ -24,6 +31,7 @@ from app.config.settings import Settings, get_settings
 from app.llm.base import LLMProvider
 from app.llm.gemini import GeminiProvider
 from app.llm.ollama import OllamaProvider
+from app.llm.openai import OpenAIProvider
 
 
 @dataclass
@@ -41,8 +49,8 @@ class ProviderEntry:
 class ProviderManager:
     """Owns the provider chain. Construct with `entries=` to inject a custom chain
     (tests, or a future settings-driven registry); otherwise it builds the current
-    real chain from `Settings` -- `GeminiProvider` at priority 1, `OllamaProvider` at
-    priority 2, each gated by its own `*_enabled` setting.
+    real chain from `Settings` -- OpenAI (1), Ollama (2), Gemini (3), each gated by its
+    own `*_enabled` setting (see the module docstring for why Gemini defaults off).
     """
 
     def __init__(
@@ -57,14 +65,19 @@ class ProviderManager:
         else:
             self._entries = [
                 ProviderEntry(
-                    provider=GeminiProvider(settings=self._settings, db=db),
+                    provider=OpenAIProvider(settings=self._settings, db=db),
                     priority=1,
-                    enabled=True,
+                    enabled=self._settings.openai_enabled,
                 ),
                 ProviderEntry(
                     provider=OllamaProvider(settings=self._settings, db=db),
                     priority=2,
                     enabled=self._settings.ollama_enabled,
+                ),
+                ProviderEntry(
+                    provider=GeminiProvider(settings=self._settings, db=db),
+                    priority=3,
+                    enabled=self._settings.gemini_enabled,
                 ),
             ]
 

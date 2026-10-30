@@ -224,3 +224,72 @@ def test_includes_providers_with_historical_rows_no_longer_configured(client, te
     retired = next(p for p in response.json()["providers"] if p["provider"] == "retired_provider")
     assert retired["enabled"] is False
     assert retired["requests"] == 2
+
+
+@pytest.fixture()
+def real_chain_client(test_db, monkeypatch, health_manager):
+    """The production chain shape -- openai, ollama, gemini (disabled) -- with stub
+    providers, and USD/request budgets small enough to hit thresholds."""
+
+    def override_get_db():
+        db = test_db()
+        try:
+            yield db
+        finally:
+            db.close()
+
+    def stub_provider_manager(*, db=None):
+        return ProviderManager(
+            entries=[
+                ProviderEntry(provider=_StubProvider("openai"), priority=1, enabled=True),
+                ProviderEntry(provider=_StubProvider("ollama"), priority=2, enabled=True),
+                ProviderEntry(provider=_StubProvider("gemini"), priority=3, enabled=False),
+            ]
+        )
+
+    settings = _quota_settings(openai_daily_budget_usd=1.0, openai_monthly_budget_usd=20.0)
+    monkeypatch.setattr("app.api.routes.llm_usage.ProviderManager", stub_provider_manager)
+    monkeypatch.setattr(
+        "app.api.routes.llm_usage.QuotaManager", lambda *, db=None: QuotaManager(settings=settings, db=db)
+    )
+    app.dependency_overrides[get_db] = override_get_db
+    app.dependency_overrides[get_health_manager] = lambda: health_manager
+    app.dependency_overrides[get_current_user] = lambda: object()
+    yield TestClient(app)
+    app.dependency_overrides.clear()
+
+
+def test_openai_reports_usd_spend_gemini_requests_ollama_unmetered(real_chain_client, test_db):
+    session = test_db()
+    for cost, cached in [(0.30, 100), (0.12, 0)]:
+        session.add(LLMUsage(provider="openai", model="gpt", status="SUCCESS", cost_usd=cost, cached_tokens=cached))
+    session.commit()
+
+    providers = {p["provider"]: p for p in real_chain_client.get("/api/llm/usage").json()["providers"]}
+
+    openai_row = providers["openai"]
+    assert openai_row["unit"] == "usd"
+    assert openai_row["used"] == pytest.approx(0.42)
+    assert openai_row["limit"] == 1.0
+    assert openai_row["monthly_used"] == pytest.approx(0.42)
+    assert openai_row["monthly_limit"] == 20.0
+    assert openai_row["cost_usd"] == pytest.approx(0.42)
+    assert openai_row["cached_tokens"] == 100
+    assert openai_row["status"] == "NORMAL"
+
+    assert providers["gemini"]["unit"] == "requests"
+    assert providers["gemini"]["enabled"] is False
+    assert providers["ollama"]["unit"] is None
+    assert providers["ollama"]["limit"] is None
+    assert providers["ollama"]["monthly_limit"] is None
+
+
+def test_openai_spend_over_budget_reads_failover(real_chain_client, test_db):
+    session = test_db()
+    session.add(LLMUsage(provider="openai", model="gpt", status="SUCCESS", cost_usd=1.25))
+    session.commit()
+
+    openai_row = next(
+        p for p in real_chain_client.get("/api/llm/usage").json()["providers"] if p["provider"] == "openai"
+    )
+    assert openai_row["status"] == "FAILOVER"

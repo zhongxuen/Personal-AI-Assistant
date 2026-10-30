@@ -34,6 +34,44 @@ def get_db() -> Generator[Session, None, None]:
         db.close()
 
 
+def ensure_columns(bind=None) -> list[str]:
+    """Add any *nullable* model column that an existing table doesn't have yet.
+
+    Same gap as `ensure_indexes` below, for columns: `create_all()` never alters a
+    table that already exists, so a column added to a model later (e.g.
+    `llm_usage.cost_usd`) would otherwise only exist on fresh installs -- and the
+    long-lived desktop database would start failing every query that selects it.
+
+    Deliberately narrow, so it stays safe to run unconditionally at startup: it only
+    ever issues `ALTER TABLE ... ADD COLUMN` for columns that are nullable and have no
+    server default to backfill, which SQLite (and Postgres) apply as a cheap metadata
+    change with existing rows reading NULL. A NOT NULL column, a type change, a
+    rename, or a drop is never attempted here -- those need a real migration (Alembic,
+    already tracked as tech debt). Returns the `table.column` names it added, for
+    logging/tests.
+    """
+    from sqlalchemy import inspect
+
+    target = bind or engine
+    added: list[str] = []
+    with target.begin() as connection:
+        inspector = inspect(connection)
+        existing_tables = set(inspector.get_table_names())
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue  # create_all() builds it whole, columns included.
+            present = {column["name"] for column in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in present or not column.nullable or column.primary_key:
+                    continue
+                column_type = column.type.compile(dialect=connection.dialect)
+                connection.exec_driver_sql(
+                    f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {column_type}'
+                )
+                added.append(f"{table.name}.{column.name}")
+    return added
+
+
 def ensure_indexes() -> None:
     """Create any index defined on a model that doesn't exist in the database yet.
 

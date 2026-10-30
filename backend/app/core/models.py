@@ -20,6 +20,10 @@ class AssistantRequest(BaseModel):
     message: str
     conversation_id: str | None = None
     metadata: dict = {}
+    # Ids of the requesting user's own uploads (`POST /api/attachments`) this message
+    # refers to. Not platform-specific -- any authenticated client can attach. A
+    # message with attachments always goes to the LLM, never the deterministic router.
+    attachment_ids: list[int] = []
 
 
 class AssistantResponse(BaseModel):

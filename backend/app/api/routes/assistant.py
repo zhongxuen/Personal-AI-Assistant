@@ -43,6 +43,8 @@ from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_health_manager, get_optional_current_user, get_tool_registry
 from app.api.local_only import enforce_desktop_local_only
+from app.attachments.service import AttachmentService
+from app.config.settings import get_settings
 from app.core.assistant import AssistantCore
 from app.core.models import AssistantRequest, AssistantResponse, AssistantStreamEvent
 from app.database.database import get_db
@@ -59,6 +61,7 @@ def _authorize(
     request: AssistantRequest,
     http_request: Request,
     current_user: User | None,
+    db: Session,
 ) -> AssistantRequest:
     """The two trust boundaries described in this module's docstring, applied in order,
     returning the request with its `user_id` pinned to the authenticated identity for
@@ -94,8 +97,30 @@ def _authorize(
                 headers={"WWW-Authenticate": "Bearer"},
             )
         request = request.model_copy(update={"user_id": current_user.username})
+        _check_attachments(request, current_user, db)
 
     return request
+
+
+def _check_attachments(request: AssistantRequest, user: User, db: Session) -> None:
+    """Reject a message referencing attachments the caller doesn't own (or that don't
+    exist) up front, with a clear 4xx -- rather than the model silently answering
+    without them. Checked before streaming starts, while a status code can still be
+    sent."""
+    if not request.attachment_ids:
+        return
+    limit = get_settings().attachment_max_per_message
+    if len(request.attachment_ids) > limit:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"A message can reference at most {limit} attachments.",
+        )
+    missing = AttachmentService(db).missing_ids(user.id, request.attachment_ids)
+    if missing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Attachment(s) not found: {', '.join(map(str, missing))}.",
+        )
 
 
 @router.post("/assistant/message", response_model=AssistantResponse)
@@ -107,7 +132,7 @@ async def post_message(
     health_manager: HealthManager = Depends(get_health_manager),
     current_user: User | None = Depends(get_optional_current_user),
 ) -> AssistantResponse:
-    request = _authorize(request, http_request, current_user)
+    request = _authorize(request, http_request, current_user, db)
 
     # The process-wide HealthManager (not a fresh one per request) so provider
     # cooldowns/consecutive-error state actually persists across requests -- see
@@ -151,7 +176,7 @@ async def post_message_stream(
     preview -- see `AssistantStreamEvent` for the event taxonomy and why there is no
     separate error event.
     """
-    request = _authorize(request, http_request, current_user)
+    request = _authorize(request, http_request, current_user, db)
     core = AssistantCore(registry, db=db, health_manager=health_manager)
 
     async def events() -> AsyncIterator[str]:

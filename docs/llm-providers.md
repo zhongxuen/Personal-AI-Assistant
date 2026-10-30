@@ -1,11 +1,12 @@
 # LLM Providers
 
-Two `LLMProvider` implementations exist so far: `GeminiProvider` (file 05,
-`backend/app/llm/gemini.py`) and `OllamaProvider` (file 07,
-`backend/app/llm/ollama.py`). Both speak the provider-agnostic contract in
+Three `LLMProvider` implementations exist: `OpenAIProvider`
+(`backend/app/llm/openai.py`, the primary), `OllamaProvider` (file 07,
+`backend/app/llm/ollama.py`, the local fallback) and `GeminiProvider` (file 05,
+`backend/app/llm/gemini.py`, opt-in only). All speak the provider-agnostic contract in
 `backend/app/llm/base.py` -- `AssistantCore`/`AIRouter` never touch a vendor-specific
-type. This section covers each provider in isolation, then how they're registered
-into the chain `AIRouter` actually walks.
+type. This section covers how they're registered into the chain `AIRouter` walks, then
+each provider in isolation.
 
 ## Provider chain (`ProviderManager`)
 
@@ -15,8 +16,13 @@ chain:
 
 | Priority | Provider  | Enable/disable via     | Default   |
 |---------:|-----------|-------------------------|-----------|
-| 1        | Gemini    | `GEMINI_API_KEY` unset -> `is_available()` returns False (no separate on/off flag) | -- |
+| 1        | OpenAI    | `OPENAI_ENABLED` (and `OPENAI_API_KEY` unset -> `is_available()` False) | `true` |
 | 2        | Ollama    | `OLLAMA_ENABLED`        | `true`    |
+| 3        | Gemini    | `GEMINI_ENABLED`        | `false`   |
+
+Gemini is deliberately **off by default and last**: its free tier lets Google use
+submitted content to improve its products, so it must never be a turn's *silent*
+failover target. Turn it on only with a paid key, or if that trade-off is acceptable.
 
 Lower priority number runs first. `AIRouter.route()` walks the chain in that order,
 skipping any provider that's disabled, over its quota budget, or currently unhealthy,
@@ -24,14 +30,51 @@ and calling the rest until one returns `SUCCESS` -- see `ai_router.py`'s docstri
 the full skip/fallback-logging behavior. `AIRouter` has no provider-specific branches
 for either provider; it only reads `ProviderManager.get_chain()`.
 
-`OLLAMA_ENABLED=false` removes Ollama's chain entry entirely (Gemini-only chain, no
-failover target) -- distinct from Ollama simply being unreachable, which instead makes
+`OLLAMA_ENABLED=false` removes Ollama's chain entry entirely (OpenAI-only chain with
+Gemini off, no failover target) -- distinct from Ollama simply being unreachable, which instead makes
 its *enabled* entry skip itself per-request via `is_available()`/the pre-flight probe
 in `generate()`. Use `OLLAMA_ENABLED=false` when there's no local Ollama server at all
 and you'd rather not pay the (short-timeout) probe on every request; leave it `true`
 (default) whenever a local server might be running.
 
+## OpenAI (`OpenAIProvider`)
+
+- Config: `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.4-mini` -- must be a model the
+  key can use), `OPENAI_TIMEOUT_SECONDS` (30), `OPENAI_MAX_RETRIES` (1),
+  `OPENAI_RETRY_BASE_DELAY_SECONDS` (0.4), optional `OPENAI_REASONING_EFFORT`.
+- **Privacy, enforced in code** (tests: `tests/llm/test_openai_privacy.py`): every call
+  uses the Responses API with `store=False`, built by one helper (`_build_params`) and
+  sent by one other (`_send`, which refuses anything else). No `previous_response_id`,
+  Conversations API, Files API, vector stores, Assistants/threads or background mode --
+  history is resent by us on every request, attachments go inline as base64
+  (`input_file`/`input_image`), and `metadata` is never set. Multi-step tool use with a
+  reasoning model works statelessly via `include=["reasoning.encrypted_content"]`: we
+  hold the encrypted reasoning items and replay them on the next step.
+- Prompt layout is static-first so OpenAI's automatic prompt caching applies: fixed
+  `instructions` -> tools (strict, sorted by name) -> a developer message with the
+  per-request context (time, platform, memory) -> recent turns as real user/assistant
+  items -> the user message. `prompt_cache_key` is a hash of the user id. Cached input
+  tokens are logged to `llm_usage.cached_tokens`.
+- Tools are sent as strict function tools: every object closed, every property
+  required, originally-optional properties made nullable (nulls are dropped again
+  before `ToolExecutor` sees the call). A free-form object property, which strict mode
+  can't express, travels as a JSON-encoded string and is decoded back.
+- Error classification mirrors Gemini's: 429 / `insufficient_quota` -> `QUOTA_EXHAUSTED`;
+  timeout / connection error / 5xx -> `RETRYABLE_ERROR` (retried with backoff; when
+  streaming, only until the first delta); 404 -> `PERMANENT_ERROR`
+  `model_not_found:<OPENAI_MODEL>`; 400/401/403 -> `PERMANENT_ERROR`.
+- **Budget is spend, not requests.** Each `llm_usage` row carries `cost_usd`, estimated
+  from token counts x `OPENAI_INPUT_PRICE_PER_MTOK` / `OPENAI_CACHED_INPUT_PRICE_PER_MTOK`
+  / `OPENAI_OUTPUT_PRICE_PER_MTOK`. Those prices are placeholders -- keep them in sync
+  with OpenAI's pricing page for the configured model. `QuotaManager` sums today's (and,
+  if `OPENAI_MONTHLY_BUDGET_USD` is set, this month's) cost against
+  `OPENAI_DAILY_BUDGET_USD` with the usual NORMAL/WARNING/CRITICAL/FAILOVER thresholds.
+- It is the only provider with `supports_tool_loop = True`: `AssistantCore` sends tool
+  results back to it until it answers in text or `LLM_MAX_TOOL_STEPS` rounds have run.
+
 ## Gemini (`GeminiProvider`)
+
+- **Opt-in** (`GEMINI_ENABLED=true`), priority 3 -- see the chain table above for why.
 
 - Config: `GEMINI_API_KEY`, `GEMINI_MODEL` (default `gemini-3.6-flash`),
   `GEMINI_TIMEOUT_SECONDS` (default 15), `GEMINI_MAX_RETRIES` (default 1).
@@ -62,6 +105,10 @@ and you'd rather not pay the (short-timeout) probe on every request; leave it `t
   (`QuotaManager._UNBILLED_STATUSES`): the real provider quota isn't charged for a
   rejected key or an unknown model, so neither is the internal budget. They still show
   up in the Provider Status page's request/failure counts, which report every attempt.
+- No tool-result loop: Gemini keeps the single-shot behavior (its tool calls run once
+  and their results are reported directly). If a turn fails over to it mid-loop, the
+  earlier tool results reach it as `tool_results` in its context. Attachments are not
+  sent to it.
 
 ## Ollama (`OllamaProvider`)
 
@@ -93,9 +140,13 @@ and you'd rather not pay the (short-timeout) probe on every request; leave it `t
   pick a model known to support it (e.g. `llama3.1`, `qwen2.5`, `mistral-nemo`) rather
   than relying on this fallback.
 
+- Like Gemini: no tool-result loop (single-shot tool calls; earlier loop results reach
+  it as `tool_results` in its system context on a mid-loop failover), and attachments
+  are not sent to it.
+
 ## Streaming
 
-Both providers also implement `generate_stream()`, the incremental form of
+All three providers implement `generate_stream()`, the incremental form of
 `generate()`: it yields `LLMStreamChunk` text deltas as the model produces them, then
 exactly one terminal chunk carrying the complete `LLMResult`. `AIRouter.route_stream()`
 walks the same chain, with the same quota and health gating, and
@@ -117,9 +168,11 @@ Three rules the implementations share, and any future provider must too:
   so an exception can't become an error status any more.
 - **Log `llm_usage` exactly once**, same as `generate()`. Otherwise streaming would be
   a way to spend provider quota without it counting against the internal budget.
-- **No retries.** Once a delta has been sent it cannot be unsent, so retrying would
-  duplicate visible text. `AIRouter.route_stream` fails over instead -- but only while
-  nothing has been emitted yet. A provider that fails *after* emitting text ends the
+- **No retries once text is out.** Once a delta has been sent it cannot be unsent, so
+  retrying would duplicate visible text. (`OpenAIProvider` retries a RETRYABLE failure
+  only while nothing has been emitted; Gemini and Ollama don't retry streams at all.)
+  `AIRouter.route_stream` fails over instead -- but only while nothing has been emitted
+  yet. A provider that fails *after* emitting text ends the
   turn with its own error rather than letting a second provider overwrite what the user
   is already reading.
 

@@ -27,6 +27,35 @@ from app.database import models  # noqa: F401 -- registers tables on Base.metada
 from app.database.database import Base
 
 
+class RealOpenAICallBlocked(BaseException):
+    """Raised when a test lets a request reach OpenAI's real transport. A
+    `BaseException`, like `tests.core.test_zero_llm.NetworkBlocked`, so no provider's
+    broad `except Exception` can swallow it and turn it into a quiet failover."""
+
+
+@pytest.fixture(autouse=True)
+def _block_real_openai(monkeypatch):
+    """No test may ever reach the real OpenAI API.
+
+    `Settings` reads the repo's real `.env`, which holds a real OPENAI_API_KEY, so any
+    test that builds a real provider chain and sends an LLM_REQUIRED message would
+    otherwise make a real, billed call. The `openai` SDK (3.x) talks through its own
+    `httpx2` package, which the `httpx` patches in the `no_network` fixtures don't
+    cover -- so it's blocked here, for every test. Tests exercise `OpenAIProvider` by
+    injecting a stub client (`provider._client`), never the transport.
+    """
+    import httpx2
+
+    def _blocked(*_args, **_kwargs):
+        raise RealOpenAICallBlocked("A test attempted a real OpenAI network call.")
+
+    async def _blocked_async(*_args, **_kwargs):
+        raise RealOpenAICallBlocked("A test attempted a real OpenAI network call.")
+
+    monkeypatch.setattr(httpx2.Client, "send", _blocked)
+    monkeypatch.setattr(httpx2.AsyncClient, "send", _blocked_async)
+
+
 @pytest.fixture()
 def test_db(monkeypatch):
     """A throwaway in-memory SQLite DB wired into every tool module that opens its own

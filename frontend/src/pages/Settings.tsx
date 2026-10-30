@@ -1,10 +1,14 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
-import { Bot, Copy, FolderTree, MessageCircle, Pause, Play, Trash2 } from 'lucide-react'
+import { Bot, Copy, FileText, FolderTree, MessageCircle, Pause, Play, Trash2 } from 'lucide-react'
 import { useMemorySettings } from '../hooks/useMemorySettings'
 import { useDiscordBot } from '../hooks/useDiscordBot'
 import { useWhatsAppLink } from '../hooks/useWhatsAppLink'
 import { useProjects } from '../hooks/useProjects'
+import { useHealth } from '../hooks/useHealth'
+import { deleteAttachment, listAttachments } from '../services/api'
+import { StorageNoticePanel } from '../components/StorageNotice'
+import type { Attachment } from '../types/attachment'
 import type { ApplicationMapping } from '../types/memory'
 import type { DiscordBotState } from '../types/discord'
 import {
@@ -450,6 +454,93 @@ function ProjectRootsPanel() {
   )
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** Files uploaded from the chat's paperclip button, as stored on this backend's disk,
+ * with a delete control -- the only way to remove one after it's been sent. */
+function StoredAttachmentsPanel() {
+  const [attachments, setAttachments] = useState<Attachment[] | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [deletingId, setDeletingId] = useState<number | null>(null)
+  const { show } = useToast()
+
+  useEffect(() => {
+    let cancelled = false
+    listAttachments()
+      .then((rows) => {
+        if (!cancelled) setAttachments(rows)
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(err instanceof Error ? err.message : 'Unknown error')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  async function handleDelete(attachment: Attachment) {
+    setDeletingId(attachment.id)
+    try {
+      await deleteAttachment(attachment.id)
+      setAttachments((prev) => (prev ?? []).filter((row) => row.id !== attachment.id))
+      show(`Deleted ${attachment.filename}.`, 'success')
+    } catch (err: unknown) {
+      show(err instanceof Error ? err.message : 'Failed to delete attachment.', 'danger')
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
+  return (
+    <Panel className="mt-8 p-4">
+      <div className="flex items-center gap-2">
+        <FileText className="h-4 w-4 text-text-muted" />
+        <h2 className="font-display text-sm font-semibold text-text">Attachments</h2>
+      </div>
+      <p className="mt-1 text-xs text-text-muted">
+        Files you've attached in chat, stored on this backend's disk. They're sent to the AI
+        provider only inline, with the message that uses them.
+      </p>
+
+      {error && <p className="mt-3 text-sm text-danger">Failed to load attachments: {error}</p>}
+      {!error && attachments === null && <Skeleton className="mt-3 h-9 w-64" />}
+      {attachments !== null && attachments.length === 0 && (
+        <p className="mt-3 text-sm text-text-muted">No attachments stored.</p>
+      )}
+      {attachments !== null && attachments.length > 0 && (
+        <div className="mt-3 space-y-2">
+          {attachments.map((attachment) => (
+            <div
+              key={attachment.id}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-surface-2/60 p-2"
+            >
+              <span className="min-w-0 truncate text-xs text-text">
+                {attachment.filename}{' '}
+                <span className="font-mono text-text-muted">
+                  · {formatBytes(attachment.size_bytes)} · {new Date(attachment.created_at).toLocaleString()}
+                </span>
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                loading={deletingId === attachment.id}
+                onClick={() => void handleDelete(attachment)}
+                aria-label={`Delete ${attachment.filename}`}
+              >
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  )
+}
+
 export function SettingsPage() {
   const {
     applications,
@@ -461,6 +552,7 @@ export function SettingsPage() {
     saveDefaultProject,
   } = useMemorySettings()
   const { show } = useToast()
+  const health = useHealth()
 
   const [editingAlias, setEditingAlias] = useState<string | null>(null)
   const [editValue, setEditValue] = useState<EditableMapping>(EMPTY_EDITABLE)
@@ -575,6 +667,12 @@ export function SettingsPage() {
           same values <code className="text-text">open_application</code> and{' '}
           <code className="text-text">run_routine</code> resolve against.
         </p>
+
+        {/* The cross-device limitation (local-only storage) -- stated up front, with
+            which kind of backend this tab is talking to (`/api/health`'s storage_mode). */}
+        <StorageNoticePanel mode={health.status === 'ready' ? health.data.storage_mode : null} />
+
+        <StoredAttachmentsPanel />
 
         {/* Independent of the memory-settings load below -- its own data source
             (`/api/discord/status`), so it renders/loads on its own rather than waiting

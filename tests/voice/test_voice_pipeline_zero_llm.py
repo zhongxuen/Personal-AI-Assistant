@@ -23,6 +23,7 @@ import io
 from unittest.mock import Mock
 
 import httpx
+import httpx2
 import pytest
 
 from app.api.dependencies import (
@@ -69,6 +70,10 @@ def no_network(monkeypatch):
     monkeypatch.setattr(httpx, "get", _blocked)
     monkeypatch.setattr(httpx, "post", _blocked)
     monkeypatch.setattr(httpx.AsyncClient, "send", _blocked_async)
+    # The openai SDK sends through its own `httpx2` package, which the httpx
+    # patches above don't reach (see tests/conftest.py's _block_real_openai).
+    monkeypatch.setattr(httpx2.Client, "send", _blocked)
+    monkeypatch.setattr(httpx2.AsyncClient, "send", _blocked_async)
     if requests is not None:  # pragma: no cover - exercised only if requests is installed
         monkeypatch.setattr(requests.sessions.Session, "request", _blocked)
         monkeypatch.setattr(requests, "get", _blocked)

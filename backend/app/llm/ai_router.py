@@ -9,10 +9,13 @@ provider on any other status. This is the single choke point where quota (§8,
 ever called, and where every attempt's outcome is fed back into `HealthManager` and
 logged to `llm_usage` (via each provider's own `generate()`, see `app.llm.gemini`).
 
-`ProviderManager` registers `GeminiProvider` (priority 1) and `OllamaProvider`
-(priority 2, file 07) -- this module has no provider-specific branches for either;
-adding a third provider requires no changes here, only another `ProviderEntry` in
-`ProviderManager`.
+`ProviderManager` registers `OpenAIProvider` (1), `OllamaProvider` (2) and
+`GeminiProvider` (3, off by default) -- this module has no provider-specific branches
+for any of them; adding another provider requires no changes here, only another
+`ProviderEntry` in `ProviderManager`.
+
+`AssistantCore`'s tool loop calls `route()`/`route_stream()` once per step, so every
+step of a turn gets the same quota/health gating and failover as the first.
 """
 
 from __future__ import annotations
@@ -91,7 +94,7 @@ class AIRouter:
             if result.status == "SUCCESS":
                 # Stamp who actually answered -- only the router knows which chain entry
                 # this came from, and the caller needs it to report the right provider.
-                result.provider = provider.name
+                self._stamp(result, provider)
                 return result
             # else: continue to the next provider in the chain.
 
@@ -154,7 +157,7 @@ class AIRouter:
             self._health_manager.record_result(provider.name, final)
 
             if final.status == "SUCCESS" or emitted_text:
-                final.provider = provider.name
+                self._stamp(final, provider)
                 yield LLMStreamChunk(final=final)
                 return
             # else: nothing was shown to the user yet, so failing over to the next
@@ -166,6 +169,13 @@ class AIRouter:
                 status="PERMANENT_ERROR", error_type=NO_PROVIDER_AVAILABLE_ERROR_TYPE
             )
         )
+
+    @staticmethod
+    def _stamp(result: LLMResult, provider: LLMProvider) -> None:
+        """Record which chain entry answered, and whether it can continue a tool loop
+        -- facts only the router knows, which `AssistantCore` needs."""
+        result.provider = provider.name
+        result.tool_loop = bool(getattr(provider, "supports_tool_loop", False))
 
     @staticmethod
     def _provider_stream(

@@ -4,9 +4,11 @@ Application configuration.
 Settings are loaded from environment variables / a `.env` file at the
 repository root, so the app behaves the same whether uvicorn is launched
 from `backend/` or from the repo root. Provider-specific config: Gemini
-arrived in file 05, Ollama in file 07 — see md-files/development-plan.md.
+arrived in file 05, Ollama in file 07, OpenAI (now the primary provider) after
+that — see md-files/development-plan.md and docs/llm-providers.md.
 """
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -42,6 +44,80 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:5173"
 
     database_url: str = "sqlite:///./jarvis.db"
+
+    # Local-only storage. Conversations, memory and attachments live in the SQLite file
+    # above plus `attachments_dir` on the machine running this backend -- nothing is
+    # synced to a cloud store, and nothing is kept on OpenAI (`app.llm.openai` sends
+    # every request with store=False). `storage_mode` below reports whether that disk
+    # survives a restart.
+    #
+    # `storage_ephemeral` unset -> auto-detect: Render sets RENDER=true in every
+    # service's environment, and its free plan has no persistent disk, so anything
+    # written there is wiped on restart/redeploy. render.yaml also pins
+    # STORAGE_EPHEMERAL=true explicitly so the deployed answer doesn't hinge on that.
+    storage_ephemeral: bool | None = None
+    # Where uploaded attachments are written. Empty -> `backend/data/attachments/`
+    # (gitignored). Files are stored under random names; the original filename only
+    # ever lives in the `attachments` table, never in a path.
+    attachments_dir: str = ""
+    # Upload cap. Attachments are sent inline (base64) on every request that
+    # references them, so this also bounds how large one OpenAI request can get.
+    attachment_max_bytes: int = 10 * 1024 * 1024
+    # How many attachments one chat message may reference.
+    attachment_max_per_message: int = 5
+
+    # OpenAI (primary provider). `openai_api_key` unset/empty ->
+    # OpenAIProvider.is_available() returns False without a network call, same
+    # convention as gemini_api_key below. `openai_enabled` is the operator-facing switch
+    # ProviderManager reads to include it in the chain at all.
+    #
+    # Privacy is not configurable here on purpose: every request goes through
+    # OpenAIProvider._build_params, which always sends store=False and never uses
+    # previous_response_id / conversations / file uploads (see app/llm/openai.py).
+    openai_enabled: bool = True
+    openai_api_key: str | None = None
+    # Must be a model OPENAI_API_KEY can actually use -- an unknown/retired name answers
+    # HTTP 404, which OpenAIProvider classifies as PERMANENT_ERROR
+    # (`model_not_found:<model>`) and HealthManager turns into a sticky MISCONFIGURED.
+    # A small, cost-effective general model by default; swap via env, not code (§30).
+    openai_model: str = "gpt-5.4-mini"
+    openai_timeout_seconds: float = 30.0
+    # Same *retry count* convention as gemini_max_retries: RETRYABLE_ERROR only, and
+    # never after a streamed reply has started emitting text.
+    openai_max_retries: int = 1
+    openai_retry_base_delay_seconds: float = 0.4
+    # Optional reasoning effort ("none" | "minimal" | "low" | "medium" | "high", as the
+    # model supports). Unset -> the model's own default.
+    openai_reasoning_effort: str | None = None
+
+    # OpenAI spend budget. Metered in USD, not requests -- QuotaManager sums
+    # `llm_usage.cost_usd` for today (and this month, if a monthly budget is set) and
+    # applies the same NORMAL/WARNING/CRITICAL/FAILOVER thresholds Gemini's request
+    # budget uses. Keep these BELOW any hard cap set on the OpenAI project itself, so
+    # the app fails over to Ollama before OpenAI starts rejecting calls.
+    openai_daily_budget_usd: float = 1.00
+    openai_monthly_budget_usd: float | None = None
+    openai_warning_threshold: float = 0.80
+    openai_critical_threshold: float = 0.90
+    # Per-million-token prices used to estimate `cost_usd` for each call. These are
+    # placeholders for `openai_model` -- NOT read from OpenAI. Keep them in sync with
+    # https://openai.com/api/pricing for whichever model is configured; a stale price
+    # makes the spend bar (and the budget it enforces) wrong in either direction.
+    openai_input_price_per_mtok: float = 0.75
+    openai_cached_input_price_per_mtok: float = 0.075
+    openai_output_price_per_mtok: float = 4.50
+
+    # Tool-result loop (AssistantCore). After the model asks for tools, their results
+    # are sent back so it can answer from what actually happened. This caps how many
+    # tool rounds one turn may take; once it's hit, one last call is made with tool
+    # calls disallowed so the turn still ends in a text reply.
+    llm_max_tool_steps: int = 4
+
+    # Gemini (file 05). Off by default and last in the chain (priority 3): Gemini's
+    # free tier lets Google use submitted content to improve its products, so it must
+    # never be a *silent* failover target. Set GEMINI_ENABLED=true only for a paid key
+    # (or if that trade-off is acceptable to you).
+    gemini_enabled: bool = False
 
     # Gemini (file 05). `gemini_api_key` unset/empty -> GeminiProvider.is_available()
     # returns False without a network call (§41 Rule 3). `gemini_model` is deliberately
@@ -246,6 +322,21 @@ class Settings(BaseSettings):
     @property
     def cors_origin_list(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def storage_mode(self) -> str:
+        """`"ephemeral"` when this backend's disk is wiped on restart (Render's free
+        plan), else `"local-durable"`. See `storage_ephemeral` above."""
+        ephemeral = self.storage_ephemeral
+        if ephemeral is None:
+            ephemeral = bool(os.environ.get("RENDER"))
+        return "ephemeral" if ephemeral else "local-durable"
+
+    @property
+    def attachments_path(self) -> Path:
+        if self.attachments_dir.strip():
+            return Path(self.attachments_dir).expanduser()
+        return REPO_ROOT / "backend" / "data" / "attachments"
 
     @property
     def allowed_file_directories_list(self) -> list[str]:

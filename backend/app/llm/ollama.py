@@ -162,7 +162,7 @@ class OllamaProvider:
 
     def _build_payload(self, request: LLMRequest) -> dict[str, Any]:
         messages: list[dict[str, str]] = []
-        system_instruction = self._build_system_instruction(request.context)
+        system_instruction = self._build_system_instruction(request.context_with_tool_results())
         if system_instruction:
             messages.append({"role": "system", "content": system_instruction})
         messages.append({"role": "user", "content": request.message})
@@ -172,7 +172,7 @@ class OllamaProvider:
             "messages": messages,
             "stream": False,
         }
-        tools = self._build_tools(request.tools)
+        tools = self._build_tools(request.tools_for_call())
         if tools:
             payload["tools"] = tools
         return payload
@@ -182,9 +182,8 @@ class OllamaProvider:
         # model asked for in this one `/api/chat` response (§12 call consolidation) --
         # a model that requests several tool calls in one turn gets them all folded
         # into this single list, with no repeated call back into Ollama per tool call.
-        # See `AssistantCore._handle_llm_success`'s docstring for the round trip that
-        # *does* still remain (tool results aren't sent back for a second, synthesis
-        # generation call) -- unrelated to what Ollama returns here.
+        # Ollama has no tool-result loop (`supports_tool_loop` is unset), so
+        # AssistantCore runs these once and reports their results directly.
         message = data.get("message") or {}
         tool_calls = [
             ToolCallRequest(

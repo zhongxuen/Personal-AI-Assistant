@@ -3,8 +3,9 @@
 A modular, quota-efficient personal AI assistant. See [`md-files/development-plan.md`](md-files/development-plan.md)
 for the full architecture and phased build order — that document is the source of truth for scope and sequencing.
 
-**Status:** Core assistant loop, tasks/routines/timers, and automatic Gemini→Ollama LLM failover
-are all in place. The assistant runs on desktop (CLI/local agent), a deployed web client
+**Status:** Core assistant loop, tasks/routines/timers, chat attachments, and automatic LLM
+failover (OpenAI → local Ollama, with Gemini as an opt-in third) are all in place. The model can
+call tools and see their results before answering. The assistant runs on desktop (CLI/local agent), a deployed web client
 (Vercel + Render), a Discord bot, and (newly) a mobile-facing API client. See
 [`docs/architecture.md`](docs/architecture.md) and [`docs/deployment.md`](docs/deployment.md) for
 details, and `md-files/development-plan.md` for what's still ahead.
@@ -23,7 +24,9 @@ docs/            Architecture, security, deployment notes
 
 - Python 3.12
 - Node.js 22+
-- (Later phases) [Ollama](https://ollama.com) running locally for LLM fallback
+- An OpenAI API key (`OPENAI_API_KEY` in `.env`) for the primary LLM provider — a restricted,
+  project-scoped key; see [`docs/deployment.md`](docs/deployment.md#openai-setup-privacy-and-spend)
+- Optional: [Ollama](https://ollama.com) running locally as the LLM fallback
 
 ## Setup
 
@@ -85,6 +88,28 @@ Serves on `http://127.0.0.1:5173` and proxies `/api/*` to the backend (see `vite
 pytest
 ```
 
+Frontend unit tests (Node's built-in runner, no extra dependencies): `cd frontend && npm test`.
+
 ## Environment variables
 
 See `.env.example` for the full list. Never commit `.env` — it's gitignored.
+
+## Privacy and where your data lives
+
+- **Local-only storage.** Conversations, memory and attachments are stored only on the
+  device running the JARVIS backend (SQLite + `backend/data/attachments/`, gitignored).
+  Nothing is synced to the cloud or kept online.
+- **Nothing kept on OpenAI.** Every OpenAI request uses the Responses API with
+  `store=False`; history and attachments are sent inline by the backend on each request,
+  never uploaded or referenced server-side. (`tests/llm/test_openai_privacy.py` enforces this.)
+- **Gemini is opt-in** (`GEMINI_ENABLED=false` by default): its free tier lets Google use
+  submitted content, so it's never a silent fallback.
+
+## Known limitations
+
+- **No cross-device sync.** Because data stays on the machine running the backend, using
+  JARVIS from another device through the deployed site talks to a **temporary server**: its
+  conversations, memory and files are wiped whenever it restarts or redeploys, and they won't
+  appear on your desktop install. The web app shows this on the Settings page and, against the
+  deployed backend, as a dismissible banner in the chat. More in
+  [`docs/deployment.md`](docs/deployment.md#known-limitations).

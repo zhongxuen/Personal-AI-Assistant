@@ -14,7 +14,7 @@ import pytest
 
 from app.config.settings import Settings
 from app.tools import path_safety
-from app.tools.path_safety import PathSafetyError, sanitize_path
+from app.tools.path_safety import PathSafetyError, resolve_within, sanitize_path
 
 
 @pytest.fixture(autouse=True)
@@ -97,3 +97,20 @@ def test_error_never_silently_passes_through_a_rejected_path(_allowed_dirs):
         pass
     else:
         pytest.fail("sanitize_path() should have raised PathSafetyError")
+
+
+# --- resolve_within (fixed-root containment, used by the attachments store) -----------
+
+
+@pytest.mark.parametrize(
+    "relative",
+    ["../escape.txt", "a/../../escape.txt", "..", "", "   ", "/etc/passwd", "C:\Windows\win.ini", "C:relative.txt"],
+)
+def test_resolve_within_rejects_anything_that_could_leave_the_root(tmp_path, relative):
+    with pytest.raises(PathSafetyError):
+        resolve_within(tmp_path / "store", relative)
+
+
+def test_resolve_within_accepts_a_plain_name_inside_the_root(tmp_path):
+    root = tmp_path / "store"
+    assert resolve_within(root, "abc123.pdf") == (root / "abc123.pdf").resolve()

@@ -40,6 +40,7 @@ FRONTEND_DIR = REPO_ROOT / "frontend"
 # CORS_ORIGINS or VITE_API_BASE_URL are plain config the frontend is expected to know
 # about (VITE_API_BASE_URL literally is the frontend's own build-time env var).
 SECRET_ENV_VAR_NAMES = [
+    "OPENAI_API_KEY",
     "GEMINI_API_KEY",
     "AUTH_SECRET_KEY",
     "AUTH_SEED_PASSWORD",

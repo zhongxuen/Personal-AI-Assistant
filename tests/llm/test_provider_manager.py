@@ -2,9 +2,10 @@
 ProviderManager tests (§37 Phase 5, files 06-07).
 
 Exercises the chain-assembly logic in isolation from `AIRouter`: the default chain is
-`GeminiProvider` at priority 1 then `OllamaProvider` at priority 2, `get_chain()`
-orders by ascending priority, and disabled entries -- including Ollama when
-`ollama_enabled=False` -- never appear in the chain it hands back.
+`OpenAIProvider` (1) then `OllamaProvider` (2), with `GeminiProvider` (3) present but
+disabled unless `gemini_enabled=True` -- Gemini's free tier may use submitted data, so
+it must never be a silent failover target. `get_chain()` orders by ascending priority,
+and disabled entries never appear in the chain it hands back.
 """
 
 from __future__ import annotations
@@ -12,6 +13,7 @@ from __future__ import annotations
 from app.config.settings import Settings
 from app.llm.gemini import GeminiProvider
 from app.llm.ollama import OllamaProvider
+from app.llm.openai import OpenAIProvider
 from app.llm.provider_manager import ProviderEntry, ProviderManager
 
 
@@ -30,14 +32,22 @@ def _settings(**overrides) -> Settings:
     return Settings(_env_file=None, gemini_api_key="test-api-key", **overrides)
 
 
-def test_default_chain_is_gemini_then_ollama():
+def test_default_chain_is_openai_then_ollama_with_gemini_off():
     manager = ProviderManager(settings=_settings())
 
     chain = manager.get_chain()
 
-    assert len(chain) == 2
-    assert isinstance(chain[0], GeminiProvider)
-    assert isinstance(chain[1], OllamaProvider)
+    assert [type(p) for p in chain] == [OpenAIProvider, OllamaProvider]
+    # Still configured (so the status panel can show it as disabled), just not in the chain.
+    assert manager.all_provider_names() == ["openai", "ollama", "gemini"]
+
+
+def test_gemini_joins_the_chain_last_only_when_explicitly_enabled():
+    manager = ProviderManager(settings=_settings(gemini_enabled=True))
+
+    chain = manager.get_chain()
+
+    assert [type(p) for p in chain] == [OpenAIProvider, OllamaProvider, GeminiProvider]
 
 
 def test_default_chain_excludes_ollama_when_disabled_via_settings():
@@ -45,8 +55,13 @@ def test_default_chain_excludes_ollama_when_disabled_via_settings():
 
     chain = manager.get_chain()
 
-    assert len(chain) == 1
-    assert isinstance(chain[0], GeminiProvider)
+    assert [type(p) for p in chain] == [OpenAIProvider]
+
+
+def test_openai_can_be_disabled_via_settings():
+    manager = ProviderManager(settings=_settings(openai_enabled=False, ollama_enabled=False))
+
+    assert manager.get_chain() == []
 
 
 def test_get_chain_orders_by_ascending_priority():

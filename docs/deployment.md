@@ -11,21 +11,22 @@ bundles secrets into the other — see [Secrets boundary](#secrets-boundary) bef
 
 ## Secrets boundary
 
-`Frontend → Backend/API → Gemini`, never `Frontend → Gemini` directly (§31). Concretely:
+`Frontend → Backend/API → OpenAI`, never `Frontend → OpenAI` directly (§31). Concretely:
 
-- `backend/app/config/settings.py`'s `Settings` reads every secret (`GEMINI_API_KEY`,
+- `backend/app/config/settings.py`'s `Settings` reads every secret (`OPENAI_API_KEY`, `GEMINI_API_KEY`,
   `AUTH_SECRET_KEY`, `AUTH_SEED_PASSWORD`, ...) from process environment variables / a local
   `.env` file — never a hardcoded default that's actually usable (`AUTH_SECRET_KEY`'s shipped
   default is a deliberately-obvious placeholder; `main.py` logs a warning at startup if it's
   still active outside `APP_ENV=development`).
 - The **only** environment variable the frontend build reads is `VITE_API_BASE_URL`
   (`frontend/src/services/api.ts`) — a plain URL, not a secret. Vite only exposes env vars
-  prefixed `VITE_` to client code at all, so nothing named `GEMINI_API_KEY` etc. can leak into
+  prefixed `VITE_` to client code at all, so nothing named `OPENAI_API_KEY` etc. can leak into
   the frontend bundle by accident; nothing in `frontend/` reads a non-`VITE_`-prefixed variable.
 - Verify it directly whenever you touch this: `cd frontend && npm run build && grep -ri
-  "gemini_api_key\|auth_secret_key" dist/assets/*.js` should print nothing.
+  "openai_api_key\|gemini_api_key\|auth_secret_key" dist/assets/*.js` should print nothing
+  (`tests/frontend/test_no_secrets_in_bundle.py` automates this).
 - `render.yaml`'s secret-bearing keys (`AUTH_SECRET_KEY`, `AUTH_SEED_PASSWORD`,
-  `GEMINI_API_KEY`, `CORS_ORIGINS`) are all `sync: false` — Render prompts for these once in
+  `OPENAI_API_KEY`, `GEMINI_API_KEY`, `CORS_ORIGINS`) are all `sync: false` — Render prompts for these once in
   its dashboard rather than storing the values in the repo.
 
 ## Backend prep (already in place)
@@ -64,8 +65,13 @@ Set these on the **backend host** (Render dashboard → service → Environment)
 | `ASSISTANT_TIMEZONE` | yes (deployed) | IANA name of **the user's** timezone, e.g. `Asia/Kuala_Lumpur`. Render containers run in UTC, so without this the assistant answers "what time is it" hours off (with a right-looking date) and parses "remind me tomorrow at 8pm" into the wrong zone. Pinned in `render.yaml`; the code default matches. Set to an empty value only for a desktop install, where the host clock *is* the user's clock. |
 | `AUTH_SECRET_KEY` | yes | Long random value, **not** the shipped dev default. Generate: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
 | `AUTH_SEED_USERNAME` / `AUTH_SEED_PASSWORD` | yes (or you can't log in) | One-time bootstrap user, created at startup if it doesn't already exist. |
-| `GEMINI_API_KEY` | yes, for LLM features | Unset → `GeminiProvider.is_available()` is `False`, not an error (deterministic tool routing still works). |
-| `GEMINI_MODEL` | no | Pinned to `gemini-3.6-flash` in `render.yaml`; same value is the code default if neither is set (`gemini-2.5-flash` was retired by Google on 2026-08-30). **Must be a model `GEMINI_API_KEY` can actually reach** — see [Gemini says MISCONFIGURED — model_not_found](#gemini-says-misconfigured--model_not_found) below. |
+| `OPENAI_API_KEY` | yes, for LLM features | The primary provider. Unset → `OpenAIProvider.is_available()` is `False`, not an error (deterministic tool routing still works). Use a restricted project key — see [OpenAI setup](#openai-setup-privacy-and-spend). |
+| `OPENAI_MODEL` | no | Pinned to `gpt-5.4-mini` in `render.yaml` (same as the code default). Must be a model the key can use — a 404 becomes a sticky `MISCONFIGURED`, same as Gemini's [model_not_found](#a-provider-says-misconfigured--model_not_found). Keep the `OPENAI_*_PRICE_PER_MTOK` settings in sync with this model's pricing. |
+| `OPENAI_DAILY_BUDGET_USD` / `OPENAI_MONTHLY_BUDGET_USD` | no | Internal spend budget (default $1.00/day, no monthly cap). At 100% the app stops calling OpenAI and fails over. Keep it below the hard budget on the OpenAI project. |
+| `STORAGE_EPHEMERAL` | no | `true` in `render.yaml`. Makes `/api/health` report `storage_mode: "ephemeral"`, which shows the "temporary server" notice in the web app. Auto-detected from Render's own `RENDER` env var if unset. |
+| `GEMINI_ENABLED` | no | `false` (default, and pinned in `render.yaml`). Gemini's free tier lets Google use submitted content, so it's opt-in only. |
+| `GEMINI_API_KEY` | only if `GEMINI_ENABLED=true` | Unset → `GeminiProvider.is_available()` is `False`, not an error. |
+| `GEMINI_MODEL` | no | Pinned to `gemini-3.6-flash` in `render.yaml`; same value is the code default if neither is set (`gemini-2.5-flash` was retired by Google on 2026-08-30). **Must be a model `GEMINI_API_KEY` can actually reach** — see [A provider says MISCONFIGURED — model_not_found](#a-provider-says-misconfigured--model_not_found) below. |
 | `OLLAMA_ENABLED` | recommended `false` | No Ollama server is reachable from Render; disables the per-request probe outright. |
 | `DATABASE_URL` | no | Defaults to `sqlite:///./jarvis.db`. See [SQLite persistence](#known-limitations) below before depending on this for real data. |
 | `DISCORD_BOT_TOKEN` | no | Unset -> the Discord bot never starts (`DiscordBotManager.start()` no-ops); the rest of the backend is unaffected. |
@@ -76,6 +82,36 @@ Set on the **frontend host** (Vercel → project → Settings → Environment Va
 | Variable | Required | Notes |
 |---|---|---|
 | `VITE_API_BASE_URL` | yes | The deployed backend's base URL, e.g. `https://jarvis-api-hi10.onrender.com` (no trailing slash, no `/api` suffix — routes already include it). Left unset, the frontend calls relative `/api/...` paths, which only works behind Vite's dev proxy. |
+
+## OpenAI setup (privacy and spend)
+
+The code side is fixed: every request uses the Responses API with `store=False`, nothing
+is referenced across requests (`previous_response_id`, Conversations, Files, vector
+stores and Assistants are never used), attachments go inline, and `metadata` is never
+set — `tests/llm/test_openai_privacy.py` fails if any of that regresses. The account
+side is yours, done once in the [OpenAI dashboard](https://platform.openai.com):
+
+1. **A dedicated project + restricted key.** Create a project for JARVIS, then an API
+   key scoped to it with **Restricted** permissions: allow **Responses** (write) — the
+   Model capabilities permission that covers `/v1/responses` — and **Models** (read, so
+   you can list what the key reaches). Leave everything else (Files, Vector Stores,
+   Assistants, Threads, Fine-tuning, Batch, ...) at **None**, so even a bug can't upload
+   or store anything through this key.
+2. **Data controls.** In the organization/project data controls, make sure sharing
+   inputs/outputs with OpenAI for training/improvement is **off**, and turn off any
+   optional request logging you don't need. Note what `store=False` does and doesn't
+   do: responses aren't stored for later retrieval, but OpenAI may still keep API
+   traffic for a limited period for abuse monitoring under its standard API data
+   policy. Zero Data Retention, if you need it, is an org-level arrangement with
+   OpenAI, not a flag this app can set.
+3. **A hard budget on the project** (Limits → budget) a little above
+   `OPENAI_DAILY_BUDGET_USD` × 30 (or `OPENAI_MONTHLY_BUDGET_USD`). The in-app budget
+   fails over to Ollama first; the project budget is the backstop if the price settings
+   ever drift from reality.
+4. **Set the key on each backend**: `OPENAI_API_KEY` in your local `.env` for the
+   desktop install, and in Render → `jarvis-api` → Environment for the deployed one
+   (it's a `sync: false` key in `render.yaml`, so Render prompts for it on a new
+   Blueprint but an *existing* service needs it added by hand).
 
 ## Web client (file 12 prompt 2)
 
@@ -233,7 +269,8 @@ order:
    repo root and proposes one service, `jarvis-api`, rooted at `backend/`, on the free plan.
 4. Render pauses at apply time for every `sync: false` var in `render.yaml` — fill in
    `AUTH_SECRET_KEY` (e.g. `python -c "import secrets; print(secrets.token_urlsafe(48))"`),
-   `AUTH_SEED_USERNAME`, `AUTH_SEED_PASSWORD`, `GEMINI_API_KEY`. `CORS_ORIGINS` can be filled in
+   `AUTH_SEED_USERNAME`, `AUTH_SEED_PASSWORD`, `OPENAI_API_KEY` (`GEMINI_API_KEY` can stay
+   blank — Gemini is disabled). `CORS_ORIGINS` can be filled in
    now if the Vercel project (and its stable production domain) already exists — Vercel assigns
    that domain the first time a project is created, before the first successful deploy — otherwise
    leave it blank and set it in step 3 below.
@@ -281,7 +318,11 @@ a stuck login (wrong `AUTH_SEED_*` values, or `VITE_API_BASE_URL` pointed at the
 
 ## Troubleshooting
 
-### Gemini says MISCONFIGURED — `model_not_found`
+### A provider says MISCONFIGURED — `model_not_found`
+
+The walkthrough below is for Gemini; OpenAI behaves identically with `OPENAI_MODEL` /
+`OPENAI_API_KEY` (list what a key can reach with
+`python -c "from openai import OpenAI; print(sorted(m.id for m in OpenAI(api_key='YOUR_KEY').models.list()))"`).
 
 Symptom: chat answers every non-deterministic message with *"I can't reach any reasoning provider
 right now, so I can't work through that request. I can still handle direct commands in the
@@ -320,18 +361,29 @@ Fix:
   instance. A [cron-job.org](https://console.cron-job.org/jobs) job ("Keep Jarvis backend warm")
   GETs `https://jarvis-api-hi10.onrender.com/api/health` every 10 minutes so the service never
   sees 15 idle minutes, and emails after 3 consecutive failures. If the backend URL changes,
-  update that job. This replaced a GitHub Actions cron workflow: GitHub throttles scheduled
+  update that job. **cron-job.org silently auto-disables a job after too many consecutive
+  failures** (e.g. while Render is redeploying, suspended, or returning errors) — it happened
+  on 2026-09-26 and the job then sat "Inactive" for a month while the backend went back to
+  cold-starting. If cold starts reappear, check the job's status first and re-tick
+  "Enable job". Its 30s timeout is shorter than a cold start (~50-75s), so a ping that lands on
+  an asleep instance shows as a timeout failure even though it still wakes the service; the
+  next ping succeeds. `/api/health` answers both GET and HEAD, so either request method works. This replaced a GitHub Actions cron workflow: GitHub throttles scheduled
   workflows so heavily that a `*/10` schedule fired only every 2-5 hours, so every ping hit a
   cold start (and failed whenever that took over 60s). The ping still counts against Render's
   free-tier monthly hour cap. If cold starts are unacceptable, upgrade `jarvis-api` to a paid
   Render plan.
-- **SQLite persistence** — Render's free web-service plan has no persistent disk; `jarvis.db`
-  lives on the container's ephemeral filesystem and is wiped on every redeploy and on the
-  periodic restart free instances get after idling. Fine for demoing the deployed dashboards;
-  don't treat it as the durable store for real tasks/routines/memory — that's still the local
-  desktop deployment's SQLite file (file 11), which doesn't have this problem. Promoting the
-  cloud deployment to a real persistent store (a paid Render disk, or an external Postgres) is
-  future work, not done here.
+- **Data lives only on the device running the backend — no cross-device sync.** All
+  conversations, memory and attachments are stored on the machine running the JARVIS
+  backend (SQLite + `backend/data/attachments/`). Nothing is synced to a cloud store or kept
+  online, and nothing is retained by OpenAI (`store=False`). The consequence: using JARVIS
+  from another device through the deployed site talks to the Render backend, a
+  **temporary server** — its conversations, memory and files are wiped on every
+  restart/redeploy (and on the periodic restart free instances get after idling), and they
+  never appear on your desktop install. The web app says so on the Settings page and, when
+  `/api/health` reports `storage_mode: "ephemeral"`, in a dismissible banner in the chat.
+  Treat the desktop install's SQLite file as the durable store. Making the deployed backend
+  durable (a paid Render disk, or an external database) would change this local-only
+  storage model, so it's deliberately not done here.
 - **Voice and desktop-only tools stay local** — by design (§23, §33): the deployed backend
   always rejects `platform="desktop"` requests (including all of `/api/voice/message`) that
   don't arrive from loopback. This is not a bug to fix in the cloud deployment; it's the

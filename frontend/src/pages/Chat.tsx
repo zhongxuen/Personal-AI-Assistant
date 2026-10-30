@@ -1,12 +1,26 @@
-import { useEffect, useState } from 'react'
-import type { FormEvent } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { ChangeEvent, FormEvent } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
-import { Bot, Send, User } from 'lucide-react'
-import { streamChatMessage } from '../services/api'
+import { Bot, FileText, Paperclip, Send, User, X } from 'lucide-react'
+import { deleteAttachment, streamChatMessage, uploadAttachment } from '../services/api'
 import type { AssistantToolCallResult } from '../types/assistant'
+import type { Attachment } from '../types/attachment'
 import { Button, Input } from '../components/ui'
 import { cn } from '../components/ui/utils'
+import { EphemeralStorageBanner } from '../components/StorageNotice'
+import { useHealth } from '../hooks/useHealth'
 import { usePersistentState } from '../hooks/usePersistentState'
+
+// Mirrors the backend's allow-list (app/attachments/service.py's ALLOWED_EXTENSIONS);
+// the backend re-checks contents, this only narrows the file picker.
+const ATTACHMENT_ACCEPT = '.pdf,.txt,.md,.markdown,.png,.jpg,.jpeg,.gif,.webp'
+
+/** Just enough of an attachment to label it in the thread -- persisted with the
+ * message, so it never carries file contents. */
+interface AttachmentRef {
+  id: number
+  filename: string
+}
 
 interface ChatMessage {
   role: 'user' | 'assistant'
@@ -14,6 +28,8 @@ interface ChatMessage {
   usedLlm?: boolean
   provider?: string | null
   toolCalls?: AssistantToolCallResult[]
+  /** Files sent with a user message (labels only -- the bytes stay on the backend). */
+  attachments?: AttachmentRef[]
   /** True while this reply is still arriving over the stream. Drives the in-bubble
    * thinking dots and suppresses the "Reasoned (provider)" label, which isn't known
    * until the terminal `done` event says which provider actually answered. Never
@@ -56,6 +72,43 @@ export function ChatPage() {
   const [input, setInput] = useState('')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Uploaded but not yet sent. Uploading happens on pick (so a rejected type/size is
+  // reported immediately); the ids ride along with the next message.
+  const [pending, setPending] = useState<Attachment[]>([])
+  const [uploading, setUploading] = useState(false)
+  const fileInput = useRef<HTMLInputElement>(null)
+  const health = useHealth()
+  const storageMode = health.status === 'ready' ? health.data.storage_mode : null
+
+  async function handleFilesPicked(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? [])
+    // Reset so picking the same file again still fires `change`.
+    event.target.value = ''
+    if (files.length === 0) return
+    setUploading(true)
+    setError(null)
+    try {
+      for (const file of files) {
+        const uploaded = await uploadAttachment(file)
+        setPending((prev) => [...prev, uploaded])
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Upload failed.')
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function removePending(id: number) {
+    try {
+      // Deleted from the backend's disk, not just hidden -- an attachment removed
+      // before sending shouldn't linger in storage.
+      await deleteAttachment(id)
+      setPending((prev) => prev.filter((attachment) => attachment.id !== id))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to remove attachment.')
+    }
+  }
 
   // `messages` is persisted, so a reload (or Chrome discarding the tab) partway through
   // a streamed reply would rehydrate a bubble still flagged `streaming` -- with no
@@ -77,10 +130,12 @@ export function ChatPage() {
   async function handleSubmit(event: FormEvent) {
     event.preventDefault()
     const text = input.trim()
-    if (!text || sending) return
+    if (!text || sending || uploading) return
 
-    setMessages((prev) => [...prev, { role: 'user', text }])
+    const attachments = pending.map(({ id, filename }) => ({ id, filename }))
+    setMessages((prev) => [...prev, { role: 'user', text, attachments }])
     setInput('')
+    setPending([])
     setSending(true)
     setError(null)
 
@@ -132,7 +187,7 @@ export function ChatPage() {
             streaming: false,
           })
         }
-      })
+      }, undefined, attachments.map((attachment) => attachment.id))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to send message.')
       // Drop the placeholder rather than leave an empty assistant bubble behind -- the
@@ -155,6 +210,7 @@ export function ChatPage() {
           Talk to Jarvis over the web -- same assistant, same tools, minus anything that needs
           this machine.
         </p>
+        <EphemeralStorageBanner mode={storageMode} />
 
         <div className="mt-6 flex-1 space-y-3 overflow-y-auto pr-1">
           {messages.length === 0 && !sending && (
@@ -227,6 +283,19 @@ export function ChatPage() {
                       )}
                     </p>
                   )}
+                  {message.attachments && message.attachments.length > 0 && (
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {message.attachments.map((attachment) => (
+                        <span
+                          key={attachment.id}
+                          className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 font-mono text-[11px] text-text-muted"
+                        >
+                          <FileText className="h-3 w-3" />
+                          {attachment.filename}
+                        </span>
+                      ))}
+                    </div>
+                  )}
                   {message.toolCalls?.map((call, callIndex) => (
                     <p
                       key={callIndex}
@@ -255,14 +324,55 @@ export function ChatPage() {
 
         {error && <p className="mt-3 text-sm text-danger">{error}</p>}
 
+        {pending.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-2" aria-label="Attachments to send">
+            {pending.map((attachment) => (
+              <span
+                key={attachment.id}
+                className="inline-flex items-center gap-1.5 rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-xs text-text"
+              >
+                <FileText className="h-3.5 w-3.5 text-primary" />
+                <span className="max-w-[12rem] truncate">{attachment.filename}</span>
+                <button
+                  type="button"
+                  onClick={() => void removePending(attachment.id)}
+                  aria-label={`Remove ${attachment.filename}`}
+                  className="rounded text-text-muted transition-colors hover:text-danger"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
         <form onSubmit={handleSubmit} className="mt-4 flex gap-2">
+          <input
+            ref={fileInput}
+            type="file"
+            accept={ATTACHMENT_ACCEPT}
+            multiple
+            className="hidden"
+            onChange={(e) => void handleFilesPicked(e)}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => fileInput.current?.click()}
+            disabled={sending || uploading}
+            loading={uploading}
+            aria-label="Attach a file"
+            title="Attach a file (pdf, txt, md, image)"
+          >
+            <Paperclip className="h-4 w-4" />
+          </Button>
           <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Message Jarvis…"
+            placeholder={pending.length > 0 ? 'Ask about the attached file…' : 'Message Jarvis…'}
             className="flex-1"
           />
-          <Button type="submit" disabled={sending || !input.trim()} loading={sending}>
+          <Button type="submit" disabled={sending || uploading || !input.trim()} loading={sending}>
             <Send className="h-4 w-4" />
             Send
           </Button>

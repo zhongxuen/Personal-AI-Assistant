@@ -27,6 +27,7 @@ from unittest.mock import Mock
 
 import aiohttp
 import httpx
+import httpx2
 import pytest
 
 from app.config.settings import Settings
@@ -74,6 +75,10 @@ def no_network(monkeypatch):
     monkeypatch.setattr(httpx, "post", _blocked)
     # OllamaProvider sends through httpx.AsyncClient (app/llm/ollama.py).
     monkeypatch.setattr(httpx.AsyncClient, "send", _blocked_async)
+    # The openai SDK sends through its own `httpx2` package, which the httpx
+    # patches above don't reach (see tests/conftest.py's _block_real_openai).
+    monkeypatch.setattr(httpx2.Client, "send", _blocked)
+    monkeypatch.setattr(httpx2.AsyncClient, "send", _blocked_async)
     # google-genai prefers aiohttp over httpx for async requests whenever aiohttp is
     # installed (`_api_client.py`'s `_use_aiohttp()`), which it is here -- so patching
     # only httpx left GeminiProvider.generate a wide-open hole, and real Gemini calls
@@ -189,8 +194,18 @@ def test_run_routine_is_zero_llm(no_network, core):
     assert response.tool_calls[0]["result"]["data"]["routine"] == "coding"
 
 
+# Each cloud provider pinned on alone, with a dummy key: OpenAI (the primary, over
+# httpx) and Gemini (opt-in, over aiohttp) use different transports, so each is its
+# own canary for `no_network`.
+_SOLO_PROVIDER_SETTINGS = {
+    "openai": dict(openai_api_key="test-api-key", gemini_enabled=False),
+    "gemini": dict(openai_enabled=False, gemini_enabled=True, gemini_api_key="test-api-key"),
+}
+
+
+@pytest.mark.parametrize("provider", sorted(_SOLO_PROVIDER_SETTINGS))
 def test_unrecognized_message_actually_reaches_the_llm_but_never_the_network(
-    no_network, core, monkeypatch
+    no_network, core, monkeypatch, provider
 ):
     """The one message in this file that *doesn't* resolve deterministically.
 
@@ -210,13 +225,13 @@ def test_unrecognized_message_actually_reaches_the_llm_but_never_the_network(
     real calls leak out of the whole file, which is exactly how the aiohttp gap went
     unnoticed.
 
-    Gemini is pinned on with a dummy key and Ollama disabled so the chain is the same
-    single, deterministic provider whether or not the machine running this has any real
-    credentials configured -- no test should depend on ambient API keys.
+    One cloud provider is pinned on with a dummy key and Ollama disabled so the chain is
+    the same single, deterministic provider whether or not the machine running this has
+    any real credentials configured -- no test should depend on ambient API keys.
     """
     monkeypatch.setattr(
         "app.llm.provider_manager.get_settings",
-        lambda: Settings(_env_file=None, gemini_api_key="test-api-key", ollama_enabled=False),
+        lambda: Settings(_env_file=None, ollama_enabled=False, **_SOLO_PROVIDER_SETTINGS[provider]),
     )
 
     with pytest.raises(NetworkBlocked):

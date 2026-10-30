@@ -194,3 +194,19 @@ class TestSingleProviderChain:
         # still returns a clearly-marked result instead of raising.
         assert result.status == "PERMANENT_ERROR"
         assert result.error_type == NO_PROVIDER_AVAILABLE_ERROR_TYPE
+
+
+class _LoopCapableProvider(FakeProvider):
+    supports_tool_loop = True
+
+
+@pytest.mark.asyncio
+async def test_router_stamps_provider_and_tool_loop_capability():
+    capable = _LoopCapableProvider("openai", [LLMResult(status="SUCCESS", text="a")])
+    plain = FakeProvider("ollama", [LLMResult(status="SUCCESS", text="b")])
+
+    first = await _router(capable).route(LLMRequest(message="hi"))
+    second = await _router(plain).route(LLMRequest(message="hi"))
+
+    assert (first.provider, first.tool_loop) == ("openai", True)
+    assert (second.provider, second.tool_loop) == ("ollama", False)

@@ -63,7 +63,12 @@ function App() {
   // strip's compact bars and the full Providers tab share one `/api/llm/usage` poll
   // every 15s instead of each opening their own independent interval.
   const llmUsage = useLlmUsage()
-  const meteredProviders = (llmUsage.data?.providers ?? []).filter((p) => p.budget !== null)
+  // Only providers actually in the chain *and* metered get a strip bar -- OpenAI's
+  // daily spend, Gemini's daily requests when it's enabled. Ollama (unmetered) and
+  // disabled providers have nothing live to show here; the Providers tab lists them.
+  const meteredProviders = (llmUsage.data?.providers ?? []).filter(
+    (p) => p.enabled && p.unit !== null && p.limit !== null,
+  )
   const activeItem = NAV_ITEMS.find((item) => item.id === safeView)
 
   // §34 (file 12 prompt 2): every dashboard/chat/voice affordance below requires a
@@ -148,11 +153,10 @@ function App() {
             {activeItem?.label ?? ''}
           </h1>
 
-          {/* Always-visible daily budget bars (§8/§39) -- e.g. Gemini's free-tier
-              quota -- so a near-limit provider is visible from any tab, not just the
-              Providers tab. Only metered providers render here; Ollama (local/
-              unmetered) has nothing to bar-chart. Clicking jumps to the full
-              Providers tab. */}
+          {/* Always-visible daily budget bars (§8/§39) -- OpenAI's daily spend in USD,
+              plus Gemini's request quota if it's enabled -- so a near-limit provider is
+              visible from any tab, not just the Providers tab. Clicking jumps to the
+              full Providers tab. */}
           {meteredProviders.length > 0 && (
             <button
               onClick={() => selectView('providers')}
@@ -164,8 +168,9 @@ function App() {
                   key={provider.provider}
                   compact
                   label={provider.provider}
-                  used={provider.requests}
-                  limit={provider.budget}
+                  used={provider.used}
+                  limit={provider.limit}
+                  unit={provider.unit}
                   status={provider.status}
                 />
               ))}
