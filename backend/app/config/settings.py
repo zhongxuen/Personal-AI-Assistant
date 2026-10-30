@@ -323,12 +323,13 @@ class Settings(BaseSettings):
     @field_validator("openai_api_key", "gemini_api_key", mode="before")
     @classmethod
     def _strip_api_key(cls, value: object) -> object:
-        """A key pasted into a hosting dashboard often picks up a trailing newline or
-        space. Sent as-is it makes the Authorization header illegal, and httpcore fails
-        every call with `LocalProtocolError` before anything leaves the process. An
-        all-whitespace value means "unset"."""
+        """A key pasted into a hosting dashboard often picks up a newline or space --
+        trailing, or mid-key when the paste wrapped. Sent as-is it makes the
+        Authorization header illegal, and httpcore fails every call with
+        `LocalProtocolError` before anything leaves the process. API keys never contain
+        whitespace, so all of it is removed; an all-whitespace value means "unset"."""
         if isinstance(value, str):
-            return value.strip() or None
+            return "".join(value.split()) or None
         return value
 
     @property

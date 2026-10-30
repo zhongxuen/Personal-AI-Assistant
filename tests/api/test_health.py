@@ -47,6 +47,6 @@ def test_storage_mode_auto_detects_render(monkeypatch):
 def test_api_keys_are_stripped_of_pasted_whitespace():
     from app.config.settings import Settings
 
-    settings = Settings(_env_file=None, openai_api_key=" sk-test\n", gemini_api_key="\t\n")
+    settings = Settings(_env_file=None, openai_api_key=" sk-te\nst\n", gemini_api_key="\t\n")
     assert settings.openai_api_key == "sk-test"
     assert settings.gemini_api_key is None

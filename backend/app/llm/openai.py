@@ -133,6 +133,9 @@ _MAX_TOOL_OUTPUT_CHARS = 8_000
 
 # OpenAI error codes (body `code`, or a streamed `error`/`response.failed` code) that
 # mean "out of quota/rate limited" rather than a fault in our request.
+# Anything shaped like an API key, masked before an error message is logged.
+_KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]*")
+
 _QUOTA_CODES = {"insufficient_quota", "rate_limit_exceeded"}
 _RETRYABLE_CODES = {"server_error", "server_is_overloaded", "slow_down"}
 
@@ -560,7 +563,15 @@ class OpenAIProvider:
         if isinstance(exc, APITimeoutError):
             return "RETRYABLE_ERROR", "timeout"
         if isinstance(exc, APIConnectionError):
-            return "RETRYABLE_ERROR", f"network_error:{type(exc.__cause__ or exc).__name__}"
+            cause = exc.__cause__ or exc
+            # The cause's message says what actually broke (e.g. which header httpcore
+            # rejected). It can echo request headers, so any key-shaped text is masked.
+            logger.warning(
+                "OpenAI connection error: %s: %s",
+                type(cause).__name__,
+                _KEY_PATTERN.sub("sk-***", str(cause)),
+            )
+            return "RETRYABLE_ERROR", f"network_error:{type(cause).__name__}"
         if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
             return "RETRYABLE_ERROR", "timeout"
         if isinstance(exc, RuntimeError) and str(exc).startswith("Refusing to send"):

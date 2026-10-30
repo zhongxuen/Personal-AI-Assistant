@@ -194,3 +194,13 @@ def test_build_gate_catches_a_direct_import(tmp_path):
         "imports the openai package",
         "sets store=True",
     ]
+
+
+def test_connection_error_log_masks_keys(caplog):
+    provider = OpenAIProvider(settings=Settings(_env_file=None, openai_api_key="k"))
+    exc = APIConnectionError(request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
+    exc.__cause__ = ValueError("Illegal header value b'Bearer sk-proj-SECRET123\n'")
+    with caplog.at_level("WARNING"):
+        assert provider._classify_exception(exc) == ("RETRYABLE_ERROR", "network_error:ValueError")
+    assert "SECRET123" not in caplog.text
+    assert "Illegal header value" in caplog.text
