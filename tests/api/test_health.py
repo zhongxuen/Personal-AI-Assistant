@@ -42,3 +42,11 @@ def test_storage_mode_auto_detects_render(monkeypatch):
     assert Settings(_env_file=None).storage_mode == "ephemeral"
     # An explicit setting always wins over detection.
     assert Settings(_env_file=None, storage_ephemeral=False).storage_mode == "local-durable"
+
+
+def test_api_keys_are_stripped_of_pasted_whitespace():
+    from app.config.settings import Settings
+
+    settings = Settings(_env_file=None, openai_api_key=" sk-test\n", gemini_api_key="\t\n")
+    assert settings.openai_api_key == "sk-test"
+    assert settings.gemini_api_key is None

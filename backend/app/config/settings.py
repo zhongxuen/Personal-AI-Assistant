@@ -12,6 +12,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # backend/app/config/settings.py -> repo root is 3 levels up
@@ -318,6 +319,17 @@ class Settings(BaseSettings):
     # present value degrades to "the push service can't reach us", not "nothing sends".
     # Override it with a real address on any deployment that pushes to real devices.
     vapid_subject: str = "mailto:jarvis@localhost"
+
+    @field_validator("openai_api_key", "gemini_api_key", mode="before")
+    @classmethod
+    def _strip_api_key(cls, value: object) -> object:
+        """A key pasted into a hosting dashboard often picks up a trailing newline or
+        space. Sent as-is it makes the Authorization header illegal, and httpcore fails
+        every call with `LocalProtocolError` before anything leaves the process. An
+        all-whitespace value means "unset"."""
+        if isinstance(value, str):
+            return value.strip() or None
+        return value
 
     @property
     def cors_origin_list(self) -> list[str]:
