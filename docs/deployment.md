@@ -65,7 +65,7 @@ Set these on the **backend host** (Render dashboard → service → Environment)
 | `ASSISTANT_TIMEZONE` | yes (deployed) | IANA name of **the user's** timezone, e.g. `Asia/Kuala_Lumpur`. Render containers run in UTC, so without this the assistant answers "what time is it" hours off (with a right-looking date) and parses "remind me tomorrow at 8pm" into the wrong zone. Pinned in `render.yaml`; the code default matches. Set to an empty value only for a desktop install, where the host clock *is* the user's clock. |
 | `AUTH_SECRET_KEY` | yes | Long random value, **not** the shipped dev default. Generate: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
 | `AUTH_SEED_USERNAME` / `AUTH_SEED_PASSWORD` | yes (or you can't log in) | One-time bootstrap user, created at startup if it doesn't already exist. |
-| `OPENAI_API_KEY` | yes, for LLM features | The primary provider. Unset → `OpenAIProvider.is_available()` is `False`, not an error (deterministic tool routing still works). Use a restricted project key — see [OpenAI setup](#openai-setup-privacy-and-spend). |
+| `OPENAI_API_KEY` | yes, for LLM features | The primary provider. Unset → `OpenAIProvider.is_available()` is `False`, not an error (deterministic tool routing still works). The owner's shared key — see [OpenAI setup](#openai-setup-privacy-and-spend) and `OPENAI-RULES.md`. |
 | `OPENAI_MODEL` | no | Pinned to `gpt-5.4-mini` in `render.yaml` (same as the code default). Must be a model the key can use — a 404 becomes a sticky `MISCONFIGURED`, same as Gemini's [model_not_found](#a-provider-says-misconfigured--model_not_found). Keep the `OPENAI_*_PRICE_PER_MTOK` settings in sync with this model's pricing. |
 | `OPENAI_DAILY_BUDGET_USD` / `OPENAI_MONTHLY_BUDGET_USD` | no | Internal spend budget (default $1.00/day, no monthly cap). At 100% the app stops calling OpenAI and fails over. Keep it below the hard budget on the OpenAI project. |
 | `STORAGE_EPHEMERAL` | no | `true` in `render.yaml`. Makes `/api/health` report `storage_mode: "ephemeral"`, which shows the "temporary server" notice in the web app. Auto-detected from Render's own `RENDER` env var if unset. |
@@ -85,33 +85,44 @@ Set on the **frontend host** (Vercel → project → Settings → Environment Va
 
 ## OpenAI setup (privacy and spend)
 
-The code side is fixed: every request uses the Responses API with `store=False`, nothing
-is referenced across requests (`previous_response_id`, Conversations, Files, vector
-stores and Assistants are never used), attachments go inline, and `metadata` is never
-set — `tests/llm/test_openai_privacy.py` fails if any of that regresses. The account
-side is yours, done once in the [OpenAI dashboard](https://platform.openai.com):
+**The owner's OpenAI key rules in `OPENAI-RULES.md` (repo root; kept local, gitignored) are final and
+override anything here.** In short: the OpenAI dashboard may show only the model, token
+usage and cost -- never the project name, the task, or any content.
 
-1. **A dedicated project + restricted key.** Create a project for JARVIS, then an API
-   key scoped to it with **Restricted** permissions: allow **Responses** (write) — the
-   Model capabilities permission that covers `/v1/responses` — and **Models** (read, so
-   you can list what the key reaches). Leave everything else (Files, Vector Stores,
-   Assistants, Threads, Fine-tuning, Batch, ...) at **None**, so even a bug can't upload
-   or store anything through this key.
-2. **Data controls.** In the organization/project data controls, make sure sharing
-   inputs/outputs with OpenAI for training/improvement is **off**, and turn off any
-   optional request logging you don't need. Note what `store=False` does and doesn't
-   do: responses aren't stored for later retrieval, but OpenAI may still keep API
-   traffic for a limited period for abuse monitoring under its standard API data
-   policy. Zero Data Retention, if you need it, is an org-level arrangement with
-   OpenAI, not a flag this app can set.
-3. **A hard budget on the project** (Limits → budget) a little above
-   `OPENAI_DAILY_BUDGET_USD` × 30 (or `OPENAI_MONTHLY_BUDGET_USD`). The in-app budget
-   fails over to Ollama first; the project budget is the backstop if the price settings
-   ever drift from reality.
+The code side is fixed and enforced twice:
+
+- `backend/app/llm/openai_guard.py` is the **only** module that imports `openai`. Its
+  HTTP transport sits under the SDK and allows only `api.openai.com` and
+  `POST /v1/responses`, `/chat/completions`, `/embeddings`, `/moderations`. It forces
+  `store: false`, strips `metadata` / `user` / `safety_identifier` / `prompt_cache_key`,
+  refuses `previous_response_id` / `conversation` / `prompt` / `background`, and fails
+  any `/responses` reply (streamed or not) that isn't marked `"store": false`.
+- `app/llm/openai.py` builds requests that already follow those rules (history and
+  attachments inline, nothing referenced across requests) and treats a guard refusal
+  as a permanent, never-retried error.
+- **Build gates**: `backend/scripts/check_openai.py` runs first in Render's
+  `buildCommand`, and `frontend/scripts/check-openai.mjs` runs as `prebuild` on every
+  `npm run build` (Vercel included). Either fails the build if any non-guard file
+  imports `openai`, calls `api.openai.com` or sets `store=True`. Both are also covered
+  by `tests/llm/test_openai_guard.py`.
+
+The account side:
+
+1. **The key** is the owner's existing shared project key (`sk-proj-...`). It is
+   deliberately shared across several projects; **don't split it or create a new key /
+   OpenAI project** for this app.
+2. **Spend is tracked here, not on OpenAI**: every call writes tokens + estimated cost
+   to `llm_usage`, metered against `OPENAI_DAILY_BUDGET_USD` (and optional
+   `OPENAI_MONTHLY_BUDGET_USD`). At 100% the app stops calling OpenAI and fails over.
+   Keep the `OPENAI_*_PRICE_PER_MTOK` settings in sync with the model's real pricing.
+3. **Known, accepted limit**: OpenAI keeps API traffic for up to 30 days for abuse
+   monitoring (standard policy). It isn't on the dashboard and isn't used for training
+   by default; only Zero Data Retention would remove it, and that hasn't been requested.
 4. **Set the key on each backend**: `OPENAI_API_KEY` in your local `.env` for the
    desktop install, and in Render → `jarvis-api` → Environment for the deployed one
    (it's a `sync: false` key in `render.yaml`, so Render prompts for it on a new
-   Blueprint but an *existing* service needs it added by hand).
+   Blueprint but an *existing* service needs it added by hand). Never print, log or
+   commit it.
 
 ## Web client (file 12 prompt 2)
 

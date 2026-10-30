@@ -24,6 +24,18 @@ current `Dev` path as-is — just don't bake in assumptions that this is the pro
 
 ---
 
+## OpenAI API key rules — VERY CRUCIAL, read before touching anything OpenAI
+
+Whenever OpenAI is used (code, config, docs, or advice about the key), the owner's rules in
+`OPENAI-RULES.md` apply. They are final: never weaken, reinterpret or bypass them, and if
+something can't be built within them, stop and ask. All OpenAI traffic goes through
+`backend/app/llm/openai_guard.py` (the only file that may import `openai`); the build gates
+`backend/scripts/check_openai.py` and `frontend/scripts/check-openai.mjs` must keep passing.
+
+@OPENAI-RULES.md
+
+---
+
 ## Project overview
 
 See [`README.md`](README.md) and [`md-files/development-plan.md`](md-files/development-plan.md)

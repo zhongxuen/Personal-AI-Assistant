@@ -15,15 +15,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx2
-import openai
 import pytest
 
 from app.config.settings import Settings
 from app.database.models import LLMUsage
 from app.llm.base import LLMRequest, ToolCallRequest, ToolExchange
+from app.llm import openai_guard as openai  # the only module allowed to import the SDK
 from app.llm.openai import OpenAIProvider, _strict_object
 
-_REQUEST = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+_REQUEST = httpx2.Request("POST", f"{openai.OPENAI_BASE_URL}/responses")
 
 
 def _settings(**overrides) -> Settings:
@@ -360,9 +360,8 @@ async def test_prompt_is_static_instructions_then_context_then_turns_then_messag
     assert items[2] == {"role": "assistant", "content": "earlier a"}
     assert items[3] == {"role": "user", "content": "now"}
 
-    # One stable cache key per user, without the raw username in it.
-    assert first["prompt_cache_key"] == second["prompt_cache_key"]
-    assert "alice" not in first["prompt_cache_key"]
+    # OPENAI-RULES.md 3.2: no prompt_cache_key (it would carry an identifier).
+    assert "prompt_cache_key" not in first
 
 
 @pytest.mark.asyncio

@@ -42,7 +42,12 @@ and you'd rather not pay the (short-timeout) probe on every request; leave it `t
 - Config: `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.4-mini` -- must be a model the
   key can use), `OPENAI_TIMEOUT_SECONDS` (30), `OPENAI_MAX_RETRIES` (1),
   `OPENAI_RETRY_BASE_DELAY_SECONDS` (0.4), optional `OPENAI_REASONING_EFFORT`.
-- **Privacy, enforced in code** (tests: `tests/llm/test_openai_privacy.py`): every call
+- **Privacy, enforced in code** (`OPENAI-RULES.md` (local); tests:
+  `tests/llm/test_openai_privacy.py`, `tests/llm/test_openai_guard.py`). Every request
+  also passes through `app/llm/openai_guard.py` -- the only module importing `openai` --
+  whose transport allows only the listed endpoints, forces `store: false`, strips
+  `metadata`/`user`/`safety_identifier`/`prompt_cache_key`, refuses stored-state fields
+  and fails any reply not marked `store: false`. On top of that, every call
   uses the Responses API with `store=False`, built by one helper (`_build_params`) and
   sent by one other (`_send`, which refuses anything else). No `previous_response_id`,
   Conversations API, Files API, vector stores, Assistants/threads or background mode --
@@ -53,7 +58,7 @@ and you'd rather not pay the (short-timeout) probe on every request; leave it `t
 - Prompt layout is static-first so OpenAI's automatic prompt caching applies: fixed
   `instructions` -> tools (strict, sorted by name) -> a developer message with the
   per-request context (time, platform, memory) -> recent turns as real user/assistant
-  items -> the user message. `prompt_cache_key` is a hash of the user id. Cached input
+  items -> the user message. No `prompt_cache_key` is sent (it's banned). Cached input
   tokens are logged to `llm_usage.cached_tokens`.
 - Tools are sent as strict function tools: every object closed, every property
   required, originally-optional properties made nullable (nulls are dropped again

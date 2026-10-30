@@ -25,11 +25,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx2
-import openai
 import pytest
 
 from app.config.settings import Settings
 from app.llm.base import LLMAttachment, LLMRequest, ToolCallRequest, ToolExchange
+from app.llm import openai_guard as openai  # the only module allowed to import the SDK
 from app.llm.openai import OpenAIProvider
 
 BACKEND_APP = Path(__file__).resolve().parents[2] / "backend" / "app"
@@ -38,7 +38,7 @@ OPENAI_MODULE = BACKEND_APP / "llm" / "openai.py"
 BANNED_PARAMS = {"previous_response_id", "conversation", "background", "prompt", "metadata"}
 BANNED_ENDPOINTS = {"files", "uploads", "vector_stores", "conversations", "beta", "assistants", "threads", "containers"}
 
-_REQUEST = httpx2.Request("POST", "https://api.openai.com/v1/responses")
+_REQUEST = httpx2.Request("POST", f"{openai.OPENAI_BASE_URL}/responses")
 
 
 class _OnlyResponsesCreate:
@@ -276,7 +276,7 @@ def _module_ast() -> ast.Module:
     return ast.parse(OPENAI_MODULE.read_text(encoding="utf-8"))
 
 
-def test_only_app_llm_openai_imports_the_openai_sdk():
+def test_only_the_guard_imports_the_openai_sdk():
     importers = []
     for path in BACKEND_APP.rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -288,7 +288,7 @@ def test_only_app_llm_openai_imports_the_openai_sdk():
                 names = [node.module or ""]
             if any(name == "openai" or name.startswith("openai.") for name in names):
                 importers.append(path.relative_to(BACKEND_APP).as_posix())
-    assert sorted(set(importers)) == ["llm/openai.py"]
+    assert sorted(set(importers)) == ["llm/openai_guard.py"]
 
 
 def test_exactly_one_api_call_site_and_it_is_send():

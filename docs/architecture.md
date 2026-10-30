@@ -23,8 +23,10 @@ metered by estimated **spend** (USD, from token counts × configured prices — 
 `QuotaManager`), Gemini by request count, Ollama not at all. Per-provider details:
 [`docs/llm-providers.md`](llm-providers.md).
 
-**OpenAI privacy invariants** (enforced in `backend/app/llm/openai.py`, tested in
-`tests/llm/test_openai_privacy.py`): every request carries `store=False`, built in one
+**OpenAI privacy invariants** (`OPENAI-RULES.md` (local); enforced in
+`backend/app/llm/openai.py` and again under the SDK by `backend/app/llm/openai_guard.py`,
+the only module that imports `openai`; tested in `tests/llm/test_openai_privacy.py` and
+`tests/llm/test_openai_guard.py`): every request carries `store=False`, built in one
 helper and sent through one other that refuses anything else; nothing server-side is
 referenced across requests (no `previous_response_id`, Conversations, Files, vector
 stores, Assistants or background mode); attachments are inline base64; `metadata` is

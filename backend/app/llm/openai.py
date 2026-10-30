@@ -1,7 +1,8 @@
 """
 OpenAI LLM provider -- the primary provider (priority 1 in `ProviderManager`).
 
-Concrete `LLMProvider` over OpenAI's Responses API via the official `openai` SDK. Like
+Concrete `LLMProvider` over OpenAI's Responses API via the official `openai` SDK, reached only through
+`app.llm.openai_guard` (the one guarded client -- see OPENAI-RULES.md). Like
 `app.llm.gemini`, every OpenAI-specific type and error is translated to/from the
 provider-agnostic shapes in `app.llm.base` right here and nowhere else.
 
@@ -18,7 +19,11 @@ provider-agnostic shapes in `app.llm.base` right here and nowhere else.
    Reasoning is carried between tool-loop steps with
    `include=["reasoning.encrypted_content"]` -- opaque blobs *we* hold and replay,
    which is what makes multi-step tool use work with nothing stored on OpenAI.
-3. `metadata` is never set, so no personal content can end up in it.
+3. `metadata`, `user`, `safety_identifier` and `prompt_cache_key` are never set, so
+   nothing identifying the project, the task or the user reaches OpenAI.
+4. Every request also passes through `app.llm.openai_guard`'s transport, which
+   enforces the same rules again below the SDK (allowed endpoints only, `store` forced
+   off, banned fields stripped/refused, and a reply not marked `store: false` fails).
 
 ## Prompt layout (static-first, for OpenAI's automatic prompt caching)
 
@@ -26,8 +31,8 @@ provider-agnostic shapes in `app.llm.base` right here and nowhere else.
 by name) -> a developer message with this request's dynamic context (time, platform,
 memory) -> recent turns as real user/assistant items -> the user message (+ inline
 attachments) -> any earlier tool-loop steps. Caching only ever matches a prefix, so
-everything that changes per request sits after everything that doesn't, and
-`prompt_cache_key` (a hash of the user id) keeps one user's requests on the same cache.
+everything that changes per request sits after everything that doesn't. No
+`prompt_cache_key` is sent (OPENAI-RULES.md section 3.2); automatic caching still applies.
 
 ## Error classification (§5) -- mirrors GeminiProvider
     HTTP 429 / `insufficient_quota`        -> QUOTA_EXHAUSTED  (never retried)
@@ -51,8 +56,6 @@ import time
 from collections.abc import AsyncIterator
 from typing import Any
 
-import openai
-from openai import AsyncOpenAI
 from sqlalchemy.orm import Session
 
 from app.config.settings import Settings, get_settings
@@ -67,6 +70,14 @@ from app.llm.base import (
     ToolExchange,
 )
 from app.llm.clients import get_loop_client
+from app.llm.openai_guard import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    guarded_async_client,
+    is_policy_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +115,10 @@ _BANNED_PARAMS = frozenset(
         "conversation",  # Conversations API
         "background",  # background mode stores the response
         "prompt",  # server-stored prompt templates
-        "metadata",  # rule 3: no personal content in metadata
+        "metadata",  # rule 3: nothing identifying reaches OpenAI
+        "user",
+        "safety_identifier",
+        "prompt_cache_key",
     }
 )
 
@@ -262,9 +276,8 @@ class OpenAIProvider:
         key_hash = hashlib.sha256(api_key.encode()).hexdigest()[:12]
         return get_loop_client(
             f"openai:{key_hash}",
-            lambda: AsyncOpenAI(
+            lambda: guarded_async_client(
                 api_key=api_key,
-                max_retries=0,
                 timeout=self._settings.openai_timeout_seconds,
             ),
         )
@@ -404,13 +417,6 @@ class OpenAIProvider:
                 # forbid calling them -- the tool loop's last step must answer in text.
                 params["tool_choice"] = "none"
 
-        user_id = request.context.get("user_id")
-        if user_id:
-            # Routes one user's requests to the same prompt cache. Hashed: it's a
-            # routing hint, and the raw username has no reason to leave this machine.
-            digest = hashlib.sha256(str(user_id).encode()).hexdigest()[:24]
-            params["prompt_cache_key"] = f"jarvis-{digest}"
-
         if self._reasoning_enabled():
             # Reasoning items come back encrypted so we can carry them between tool
             # steps ourselves -- the stateless alternative to previous_response_id.
@@ -523,7 +529,7 @@ class OpenAIProvider:
             return "PERMANENT_ERROR", f"model_not_found:{self._settings.openai_model}"
         return "PERMANENT_ERROR", code
 
-    def _classify_status_error(self, exc: openai.APIStatusError) -> tuple[LLMStatus, str]:
+    def _classify_status_error(self, exc: APIStatusError) -> tuple[LLMStatus, str]:
         status_code = exc.status_code
         code = getattr(exc, "code", None)
 
@@ -545,11 +551,15 @@ class OpenAIProvider:
         return "PERMANENT_ERROR", code or f"http_{status_code}"
 
     def _classify_exception(self, exc: Exception) -> tuple[LLMStatus, str]:
-        if isinstance(exc, openai.APIStatusError):
+        if is_policy_error(exc):
+            # The transport guard refused the request or the reply -- never retried.
+            logger.error("OpenAI policy guard tripped: %s", exc)
+            return "PERMANENT_ERROR", "privacy_guard"
+        if isinstance(exc, APIStatusError):
             return self._classify_status_error(exc)
-        if isinstance(exc, openai.APITimeoutError):
+        if isinstance(exc, APITimeoutError):
             return "RETRYABLE_ERROR", "timeout"
-        if isinstance(exc, openai.APIConnectionError):
+        if isinstance(exc, APIConnectionError):
             return "RETRYABLE_ERROR", f"network_error:{type(exc.__cause__ or exc).__name__}"
         if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
             return "RETRYABLE_ERROR", "timeout"
