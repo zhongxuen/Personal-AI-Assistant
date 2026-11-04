@@ -64,7 +64,7 @@ class _OnlyCreate:
 def _settings(**overrides) -> Settings:
     defaults: dict = dict(
         openai_api_key="test-api-key",
-        openai_model="gpt-5.4-mini",
+        openai_model_quality="gpt-6.1-terra",
         openai_max_retries=1,
         openai_retry_base_delay_seconds=0.0,
     )
@@ -164,9 +164,9 @@ REQUEST_SHAPES = {
 }
 
 SETTINGS_SHAPES = {
-    "reasoning_model": dict(openai_model="gpt-5.4-mini"),
-    "reasoning_effort": dict(openai_model="gpt-5.4-mini", openai_reasoning_effort="high"),
-    "non_reasoning_model": dict(openai_model="gpt-4.1-mini"),
+    "reasoning_model": dict(openai_model_quality="gpt-6.1-terra"),
+    "reasoning_effort": dict(openai_model_quality="gpt-6.1-terra", openai_reasoning_effort="high"),
+    "non_reasoning_model": dict(openai_model_quality="gpt-4.1-mini"),
 }
 
 
@@ -240,8 +240,8 @@ def test_no_setting_or_env_var_can_turn_storage_on(monkeypatch):
 @pytest.mark.parametrize(
     "tamper",
     [
-        {"store": True},
-        {"store": None},
+        # (store True/None are no longer refused: storage is allowed under
+        # OPENAI-KEY-RULES.md rule 2. `_build_params` still sends store=False.)
         {"previous_response_id": "resp_123"},
         {"conversation": "conv_123"},
         {"background": True},

@@ -164,7 +164,7 @@ def _add_cost_rows(session, *, costs: list[float], provider: str = "openai", tim
 def _usd_settings(**overrides) -> Settings:
     defaults: dict = dict(
         openai_daily_budget_usd=1.00,
-        openai_monthly_budget_usd=None,
+        ai_monthly_budget_usd=1000.0,  # effectively no monthly cap for daily-window tests
         openai_warning_threshold=0.80,
         openai_critical_threshold=0.90,
     )
@@ -216,7 +216,7 @@ def test_monthly_budget_can_trip_failover_even_with_daily_headroom(test_db):
     earlier = now.replace(day=1, hour=0, minute=0, second=1) if now.day > 1 else now
     _add_cost_rows(session, costs=[4.95 if now.day > 1 else 0.0], timestamp=earlier)
 
-    manager = QuotaManager(settings=_usd_settings(openai_daily_budget_usd=1.0, openai_monthly_budget_usd=5.0), db=session)
+    manager = QuotaManager(settings=_usd_settings(openai_daily_budget_usd=1.0, ai_monthly_budget_usd=5.0), db=session)
 
     if now.day > 1:
         assert manager.current_usage("openai") == pytest.approx(0.10)

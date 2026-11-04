@@ -29,12 +29,10 @@ _REQUEST = httpx2.Request("POST", f"{openai.OPENAI_BASE_URL}/responses")
 def _settings(**overrides) -> Settings:
     defaults: dict = dict(
         openai_api_key="test-api-key",
-        openai_model="gpt-test-mini",
+        openai_model_quality="gpt-test-mini",
+        openai_model_bulk="gpt-test-bulk",
         openai_max_retries=2,
         openai_retry_base_delay_seconds=0.0,
-        openai_input_price_per_mtok=1.0,
-        openai_cached_input_price_per_mtok=0.1,
-        openai_output_price_per_mtok=4.0,
     )
     defaults.update(overrides)
     return Settings(_env_file=None, **defaults)
@@ -110,9 +108,11 @@ async def test_success_records_tokens_cached_tokens_and_cost(test_db):
     row = session.query(LLMUsage).one()
     assert row.provider == "openai"
     assert row.model == "gpt-test-mini"
+    assert row.job == "assistant_chat"
     assert row.cached_tokens == 400
-    # 600 uncached x $1 + 400 cached x $0.10 + 200 output x $4, per million tokens.
-    assert row.cost_usd == pytest.approx((600 * 1.0 + 400 * 0.1 + 200 * 4.0) / 1_000_000)
+    # "gpt-test-mini" isn't in OPENAI_PRICES, so it's costed at the dearest known rate
+    # (gpt-6.1-terra: $1 in, cached in at the full $1, $5 out, per million tokens).
+    assert row.cost_usd == pytest.approx((600 * 1.0 + 400 * 1.0 + 200 * 5.0) / 1_000_000)
 
 
 @pytest.mark.asyncio
@@ -215,7 +215,7 @@ def test_empty_parameter_schema_is_still_a_valid_strict_object():
     ("error", "status", "error_type"),
     [
         (_status_error(openai.RateLimitError, 429, "rate_limit_exceeded"), "QUOTA_EXHAUSTED", "rate_limit_exceeded"),
-        (_status_error(openai.RateLimitError, 429, "insufficient_quota"), "QUOTA_EXHAUSTED", "insufficient_quota"),
+        (_status_error(openai.RateLimitError, 429, "insufficient_quota"), "QUOTA_EXHAUSTED", "billing:insufficient_quota"),
         (_status_error(openai.AuthenticationError, 401), "PERMANENT_ERROR", "http_401"),
         (_status_error(openai.PermissionDeniedError, 403), "PERMANENT_ERROR", "http_403"),
         (_status_error(openai.BadRequestError, 400, "invalid_value"), "PERMANENT_ERROR", "invalid_value"),
@@ -360,7 +360,7 @@ async def test_prompt_is_static_instructions_then_context_then_turns_then_messag
     assert items[2] == {"role": "assistant", "content": "earlier a"}
     assert items[3] == {"role": "user", "content": "now"}
 
-    # OPENAI-RULES.md 3.2: no prompt_cache_key (it would carry an identifier).
+    # No prompt_cache_key (it would carry an identifier; the guard strips it anyway).
     assert "prompt_cache_key" not in first
 
 
@@ -379,14 +379,14 @@ async def test_tools_are_sorted_for_a_stable_prefix():
 async def test_reasoning_models_request_encrypted_reasoning():
     create = AsyncMock(return_value=_response(_message("ok")))
 
-    await _provider(create, settings=_settings(openai_model="gpt-5.4-mini", openai_reasoning_effort="low")).generate(
+    await _provider(create, settings=_settings(openai_model_quality="gpt-6.1-terra", openai_reasoning_effort="low")).generate(
         LLMRequest(message="hi")
     )
     kwargs = create.await_args.kwargs
     assert kwargs["include"] == ["reasoning.encrypted_content"]
     assert kwargs["reasoning"] == {"effort": "low"}
 
-    await _provider(create, settings=_settings(openai_model="gpt-4.1-mini")).generate(LLMRequest(message="hi"))
+    await _provider(create, settings=_settings(openai_model_quality="gpt-4.1-mini")).generate(LLMRequest(message="hi"))
     assert "include" not in create.await_args.kwargs
 
 

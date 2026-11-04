@@ -2,16 +2,28 @@
 OpenAI LLM provider -- the primary provider (priority 1 in `ProviderManager`).
 
 Concrete `LLMProvider` over OpenAI's Responses API via the official `openai` SDK, reached only through
-`app.llm.openai_guard` (the one guarded client -- see OPENAI-RULES.md). Like
+`app.llm.openai_guard` (the one client -- see OPENAI-KEY-RULES.md, local). Like
 `app.llm.gemini`, every OpenAI-specific type and error is translated to/from the
 provider-agnostic shapes in `app.llm.base` right here and nowhere else.
 
-## Privacy rules (non-negotiable -- a violation is a bug, and tests/llm enforce them)
+## Spend rules (OPENAI-KEY-RULES.md rules 4-6)
 
-1. Every request is built by ONE helper, `_build_params`, which always sends
-   `store=False` -- applied last, after everything else, so no setting, env var or
-   caller-supplied field can override it. Every call (streaming and non-streaming)
-   leaves through ONE other helper, `_send`, which re-checks that invariant.
+- Two model tiers from env: `LLMRequest.tier` picks `openai_model_bulk` or
+  `openai_model_quality` (default quality).
+- Every call is checked against the app's own USD budget (`QuotaManager`: daily
+  `openai_daily_budget_usd`, monthly `ai_monthly_budget_usd`) *here*, before it is sent,
+  not only by `AIRouter` -- so no caller can skip it.
+- Every call is cost-logged to `llm_usage` (job, model, tokens, estimated USD from
+  `OPENAI_PRICES`; an unknown model is costed at the dearest known price).
+- Every call sets `max_output_tokens`.
+- `credit_balance_exhausted`, `insufficient_quota` and hard spend-limit errors are
+  logged at ERROR and carried to the reply as `LLMResult.spend_stop`.
+
+## Privacy rules (a violation is a bug, and tests/llm enforce them)
+
+1. Every request is built by ONE helper, `_build_params`, and leaves through ONE other
+   helper, `_send`. Storage on OpenAI is allowed under the current key rules, but
+   `store=False` is still sent (harmless; nothing needs it stored).
 2. Nothing server-side holds our state between requests: no `previous_response_id`,
    no Conversations API, no Files API uploads, no vector stores, no Assistants/
    threads, no background mode. History is sent by us on every request, and
@@ -22,8 +34,8 @@ provider-agnostic shapes in `app.llm.base` right here and nowhere else.
 3. `metadata`, `user`, `safety_identifier` and `prompt_cache_key` are never set, so
    nothing identifying the project, the task or the user reaches OpenAI.
 4. Every request also passes through `app.llm.openai_guard`'s transport, which
-   enforces the same rules again below the SDK (allowed endpoints only, `store` forced
-   off, banned fields stripped/refused, and a reply not marked `store: false` fails).
+   enforces the same rules again below the SDK (allowed endpoints only, banned fields
+   stripped/refused).
 
 ## Prompt layout (static-first, for OpenAI's automatic prompt caching)
 
@@ -32,15 +44,21 @@ by name) -> a developer message with this request's dynamic context (time, platf
 memory) -> recent turns as real user/assistant items -> the user message (+ inline
 attachments) -> any earlier tool-loop steps. Caching only ever matches a prefix, so
 everything that changes per request sits after everything that doesn't. No
-`prompt_cache_key` is sent (OPENAI-RULES.md section 3.2); automatic caching still applies.
+`prompt_cache_key` is sent; automatic caching still applies.
 
 ## Error classification (§5) -- mirrors GeminiProvider
-    HTTP 429 / `insufficient_quota`        -> QUOTA_EXHAUSTED  (never retried)
+    app budget used up (checked locally)   -> QUOTA_EXHAUSTED  `app_budget_exhausted`
+                                                               (nothing sent)
+    `credit_balance_exhausted` / hard
+      spend limit / `insufficient_quota`   -> QUOTA_EXHAUSTED  `billing:<code>` + spend_stop
+    HTTP 429 (rate limit)                  -> QUOTA_EXHAUSTED  (never retried)
     timeout / connection error / 5xx       -> RETRYABLE_ERROR  (retried with backoff;
                                                                 streaming: only until
                                                                 the first delta)
     HTTP 404 (unknown model)               -> PERMANENT_ERROR  `model_not_found:<model>`
     HTTP 400 / 401 / 403 / other 4xx       -> PERMANENT_ERROR  (never retried)
+    `incomplete` with no text / tool call  -> PERMANENT_ERROR  `incomplete:<reason>`
+                                              (tokens and cost still logged)
 """
 
 from __future__ import annotations
@@ -78,8 +96,29 @@ from app.llm.openai_guard import (
     guarded_async_client,
     is_policy_error,
 )
+from app.llm.quota_manager import QuotaManager
 
 logger = logging.getLogger(__name__)
+
+# US$ per 1M tokens: (input, cached input, output). Must list every model the tiers
+# use (OPENAI-KEY-RULES.md rule 4) -- check https://openai.com/api/pricing when a tier
+# changes. Cached input is costed at the full input price: the rules give no cached
+# rate for these models, and the cap must never undercount.
+OPENAI_PRICES: dict[str, tuple[float, float, float]] = {
+    "gpt-6-luna": (0.10, 0.10, 0.50),
+    "gpt-6.1-terra": (1.00, 1.00, 5.00),
+}
+# A model not in the table is costed at the dearest known rate, per column.
+_FALLBACK_PRICE = tuple(max(prices[i] for prices in OPENAI_PRICES.values()) for i in range(3))
+_SNAPSHOT_SUFFIX = re.compile(r"-\d{4}-\d{2}-\d{2}$")
+
+
+def price_for(model: str) -> tuple[float, float, float]:
+    """(input, cached input, output) US$/1M tokens for `model`. OpenAI may answer with a
+    dated snapshot name (`gpt-6-luna-2026-10-01`), which counts as its base model. Any
+    other suffix (`-pro`, `-max`) is a different model and gets the fallback price."""
+    base = _SNAPSHOT_SUFFIX.sub("", model)
+    return OPENAI_PRICES.get(base, _FALLBACK_PRICE)
 
 # The assistant's fixed persona/rules. Deliberately static -- no dates, names or
 # per-request values -- because it is the head of the cached prompt prefix: changing a
@@ -131,13 +170,52 @@ _REASONING_MODEL = re.compile(r"^(o\d|gpt-([5-9]|\d{2,}))")
 # every later step of the turn, so it's capped rather than allowed to dominate cost.
 _MAX_TOOL_OUTPUT_CHARS = 8_000
 
-# OpenAI error codes (body `code`, or a streamed `error`/`response.failed` code) that
-# mean "out of quota/rate limited" rather than a fault in our request.
 # Anything shaped like an API key, masked before an error message is logged.
 _KEY_PATTERN = re.compile(r"sk-[A-Za-z0-9_-]*")
 
-_QUOTA_CODES = {"insufficient_quota", "rate_limit_exceeded"}
+# OpenAI error codes (body `code`, or a streamed `error`/`response.failed` code) that
+# mean money ran out: the org's prepaid balance, or a project/org hard spend limit.
+# These stop EVERY call until the owner acts, so they're logged at ERROR and surfaced
+# in the reply (`spend_stop`) rather than treated like a passing rate limit. The list
+# is deliberately broad -- an unrecognised billing code would otherwise fail quietly as
+# a generic 4xx -- and `_looks_like_billing` also catches them by message.
+_BILLING_CODES = {
+    "credit_balance_exhausted",
+    "insufficient_quota",
+    "billing_hard_limit_reached",
+    "billing_limit_reached",
+    "hard_limit_reached",
+    "spend_limit_reached",
+    "budget_exceeded",
+}
+_BILLING_MESSAGE = re.compile(
+    r"credit balance|hard limit|spend(ing)? limit|billing limit|budget (limit|exceeded)|exceeded your current quota",
+    re.I,
+)
+_QUOTA_CODES = {"rate_limit_exceeded"}
 _RETRYABLE_CODES = {"server_error", "server_is_overloaded", "slow_down"}
+
+
+def _spend_stop_message(code: str) -> str:
+    if code == "app_budget_exhausted":
+        return (
+            "The app's own OpenAI spend cap (AI_MONTHLY_BUDGET_USD / "
+            "OPENAI_DAILY_BUDGET_USD) has been reached, so OpenAI calls are paused until "
+            "it resets or is raised."
+        )
+    if code == "credit_balance_exhausted":
+        return (
+            "OpenAI's prepaid credit balance is used up (credit_balance_exhausted). Top it "
+            "up, or check auto-recharge, under Billing on platform.openai.com."
+        )
+    return (
+        f"OpenAI refused the call over billing ({code}): the project or org spend limit "
+        "was hit or the balance is empty. Check Billing and Limits on platform.openai.com."
+    )
+
+
+def _looks_like_billing(code: str | None, message: str | None) -> bool:
+    return code in _BILLING_CODES or bool(message and _BILLING_MESSAGE.search(message))
 
 
 def _elapsed_ms(start: float) -> float:
@@ -287,10 +365,13 @@ class OpenAIProvider:
 
     # -- request building --------------------------------------------------------
 
-    def _reasoning_enabled(self) -> bool:
-        return bool(self._settings.openai_reasoning_effort) or bool(
-            _REASONING_MODEL.match(self._settings.openai_model)
-        )
+    def model_for(self, request: LLMRequest) -> str:
+        """The configured model for `request`'s tier (rule 5)."""
+        s = self._settings
+        return s.openai_model_bulk if request.tier == "bulk" else s.openai_model_quality
+
+    def _reasoning_enabled(self, model: str) -> bool:
+        return bool(self._settings.openai_reasoning_effort) or bool(_REASONING_MODEL.match(model))
 
     def _build_tools(self, tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Our JSON-schema tools as strict Responses function tools, sorted by name so
@@ -403,12 +484,16 @@ class OpenAIProvider:
 
     def _build_params(self, request: LLMRequest, *, stream: bool) -> dict[str, Any]:
         """THE one place a Responses request is built (privacy rule 1). Streaming and
-        non-streaming calls differ only in `stream`."""
+        non-streaming calls differ only in `stream`. No `temperature`/`top_p`: newer
+        models reject them."""
+        model = self.model_for(request)
         params: dict[str, Any] = {
-            "model": self._settings.openai_model,
+            "model": model,
             "instructions": _INSTRUCTIONS,
             "input": self._build_input(request),
             "stream": stream,
+            # Rule 6: every call is capped (reasoning tokens count toward it).
+            "max_output_tokens": self._settings.openai_max_output_tokens,
         }
 
         tools = self._build_tools(request.tools)
@@ -420,7 +505,7 @@ class OpenAIProvider:
                 # forbid calling them -- the tool loop's last step must answer in text.
                 params["tool_choice"] = "none"
 
-        if self._reasoning_enabled():
+        if self._reasoning_enabled(model):
             # Reasoning items come back encrypted so we can carry them between tool
             # steps ourselves -- the stateless alternative to previous_response_id.
             params["include"] = ["reasoning.encrypted_content"]
@@ -428,7 +513,8 @@ class OpenAIProvider:
                 params["reasoning"] = {"effort": self._settings.openai_reasoning_effort}
 
         # Applied last, unconditionally: nothing above -- and no future edit to it --
-        # can produce a request that is stored on OpenAI.
+        # can carry server-side state or identifying fields to OpenAI. (store=False is
+        # no longer required by the key rules; it's kept because nothing needs storing.)
         for banned in _BANNED_PARAMS:
             params.pop(banned, None)
         params["store"] = False
@@ -438,8 +524,6 @@ class OpenAIProvider:
     def _assert_private(params: dict[str, Any]) -> None:
         """Refuse to send anything that breaks the privacy rules. Raises rather than
         repairing: reaching this means a bug in `_build_params`."""
-        if params.get("store") is not False:
-            raise RuntimeError("Refusing to send an OpenAI request without store=False.")
         leaked = _BANNED_PARAMS.intersection(params)
         if leaked:
             raise RuntimeError(f"Refusing to send an OpenAI request with {sorted(leaked)}.")
@@ -508,7 +592,7 @@ class OpenAIProvider:
 
         usage = getattr(response, "usage", None)
         details = getattr(usage, "input_tokens_details", None) if usage else None
-        return LLMResult(
+        result = LLMResult(
             text=self._response_text(response),
             tool_calls=tool_calls,
             provider_items=provider_items,
@@ -518,32 +602,65 @@ class OpenAIProvider:
             status="SUCCESS",
             latency_ms=_elapsed_ms(start),
         )
+        return self._check_incomplete(response, result)
+
+    @staticmethod
+    def _check_incomplete(response: Any, result: LLMResult) -> LLMResult:
+        """An `incomplete` reply with nothing usable -- typically a reasoning model that
+        spent all of `max_output_tokens` thinking -- is a failure, not an empty answer.
+        Its tokens stay on the result: they were billed, so they're cost-logged."""
+        if getattr(response, "status", None) != "incomplete" or result.text or result.tool_calls:
+            return result
+        details = getattr(response, "incomplete_details", None)
+        reason = getattr(details, "reason", None) or "unknown"
+        logger.warning(
+            "OpenAI reply incomplete (%s) with no text after %d output tokens -- raise "
+            "OPENAI_MAX_OUTPUT_TOKENS or lower OPENAI_REASONING_EFFORT.",
+            reason,
+            result.response_tokens,
+        )
+        result.status = "PERMANENT_ERROR"
+        result.error_type = f"incomplete:{reason}"
+        return result
 
     # -- error classification ----------------------------------------------------
 
-    def _classify_code(self, code: str | None) -> tuple[LLMStatus, str]:
+    @staticmethod
+    def _billing(code: str | None) -> tuple[LLMStatus, str]:
+        """Money ran out. Never retried, failed over like a quota stop, and loud: the
+        owner has to act before any OpenAI call can succeed again."""
+        error_type = f"billing:{code or 'spend_limit'}"
+        logger.error("OpenAI billing stop (%s): %s", error_type, _spend_stop_message(code or "spend_limit"))
+        return "QUOTA_EXHAUSTED", error_type
+
+    def _classify_code(
+        self, code: str | None, model: str, message: str | None = None
+    ) -> tuple[LLMStatus, str]:
         """An error *code* from the API body or a streamed failure event."""
+        if _looks_like_billing(code, message):
+            return self._billing(code)
         code = code or "unknown_error"
         if code in _QUOTA_CODES:
             return "QUOTA_EXHAUSTED", code
         if code in _RETRYABLE_CODES:
             return "RETRYABLE_ERROR", code
         if code == "model_not_found":
-            return "PERMANENT_ERROR", f"model_not_found:{self._settings.openai_model}"
+            return "PERMANENT_ERROR", f"model_not_found:{model}"
         return "PERMANENT_ERROR", code
 
-    def _classify_status_error(self, exc: APIStatusError) -> tuple[LLMStatus, str]:
+    def _classify_status_error(self, exc: APIStatusError, model: str) -> tuple[LLMStatus, str]:
         status_code = exc.status_code
         code = getattr(exc, "code", None)
 
-        if code == "insufficient_quota" or status_code == 429:
-            # Both a rate limit and an exhausted balance are "stop calling for now" --
-            # fail over, never retry (§5).
+        if _looks_like_billing(code, getattr(exc, "message", None)):
+            return self._billing(code)
+        if status_code == 429:
+            # A rate limit is "stop calling for now" -- fail over, never retry (§5).
             return "QUOTA_EXHAUSTED", code or "rate_limited"
         if status_code == 404:
             # Names the model, because that's the value an operator has to change
-            # (OPENAI_MODEL) -- same convention as GeminiProvider.
-            return "PERMANENT_ERROR", f"model_not_found:{self._settings.openai_model}"
+            # (OPENAI_MODEL_BULK / OPENAI_MODEL_QUALITY) -- same convention as Gemini.
+            return "PERMANENT_ERROR", f"model_not_found:{model}"
         if status_code in (408, 409):
             # Request timeout / conflict: transient by definition.
             return "RETRYABLE_ERROR", f"http_{status_code}"
@@ -553,13 +670,13 @@ class OpenAIProvider:
         # other 4xx -- an unchanged request can't start succeeding on retry.
         return "PERMANENT_ERROR", code or f"http_{status_code}"
 
-    def _classify_exception(self, exc: Exception) -> tuple[LLMStatus, str]:
+    def _classify_exception(self, exc: Exception, model: str) -> tuple[LLMStatus, str]:
         if is_policy_error(exc):
-            # The transport guard refused the request or the reply -- never retried.
+            # The transport guard refused the request -- never retried.
             logger.error("OpenAI policy guard tripped: %s", exc)
             return "PERMANENT_ERROR", "privacy_guard"
         if isinstance(exc, APIStatusError):
-            return self._classify_status_error(exc)
+            return self._classify_status_error(exc, model)
         if isinstance(exc, APITimeoutError):
             return "RETRYABLE_ERROR", "timeout"
         if isinstance(exc, APIConnectionError):
@@ -581,34 +698,53 @@ class OpenAIProvider:
         logger.warning("Unexpected error calling OpenAI: %s", exc, exc_info=True)
         return "RETRYABLE_ERROR", f"unexpected_error:{type(exc).__name__}"
 
-    # -- usage logging -----------------------------------------------------------
+    # -- budget + usage logging (rule 4) -----------------------------------------
 
-    def _cost_usd(self, result: LLMResult) -> float:
-        """Estimated spend from token counts x the configured per-model prices (see
-        settings: placeholders to keep in sync with OpenAI's pricing page)."""
-        s = self._settings
+    @staticmethod
+    def _cost_usd(result: LLMResult, model: str) -> float:
+        """Estimated spend from token counts x `OPENAI_PRICES` for `model`."""
+        input_price, cached_price, output_price = price_for(model)
         cached = min(result.cached_tokens, result.request_tokens)
         uncached = result.request_tokens - cached
         return (
-            uncached * s.openai_input_price_per_mtok
-            + cached * s.openai_cached_input_price_per_mtok
-            + result.response_tokens * s.openai_output_price_per_mtok
+            uncached * input_price + cached * cached_price + result.response_tokens * output_price
         ) / 1_000_000
 
-    def _log_usage(self, result: LLMResult, fallback_used: bool) -> None:
+    def _over_budget(self) -> bool:
+        """The pre-send budget check. `AIRouter` already skips a provider that's over
+        budget, but checking here too means no caller can send an OpenAI call that
+        skips it. No DB session -> no usage to meter (QuotaManager fails open), the
+        same convention as usage logging below."""
+        if self._db is None:
+            return False
+        if QuotaManager(settings=self._settings, db=self._db).within_budget(self.name):
+            return False
+        logger.error("OpenAI call not sent: %s", _spend_stop_message("app_budget_exhausted"))
+        return True
+
+    @staticmethod
+    def _failure(status: LLMStatus, error_type: str, start: float) -> LLMResult:
+        result = LLMResult(status=status, error_type=error_type, latency_ms=_elapsed_ms(start))
+        if error_type == "app_budget_exhausted" or error_type.startswith("billing:"):
+            result.spend_stop = _spend_stop_message(error_type.removeprefix("billing:"))
+        return result
+
+    def _log_usage(self, result: LLMResult, request: LLMRequest, fallback_used: bool) -> None:
         """One `llm_usage` row per call, success or failure -- same convention as
-        GeminiProvider._log_usage -- plus cached tokens and estimated cost, which is
-        what QuotaManager meters OpenAI's USD budget against."""
+        GeminiProvider._log_usage -- with the job, the model, cached tokens and the
+        estimated cost QuotaManager meters the USD budget against."""
         if self._db is None:
             return
+        model = self.model_for(request)
         self._db.add(
             LLMUsage(
                 provider=self.name,
-                model=self._settings.openai_model,
+                model=model,
+                job=request.job,
                 request_tokens=result.request_tokens,
                 response_tokens=result.response_tokens,
                 cached_tokens=result.cached_tokens,
-                cost_usd=self._cost_usd(result),
+                cost_usd=self._cost_usd(result, model),
                 status=result.status,
                 error_type=result.error_type,
                 latency=int(result.latency_ms),
@@ -621,17 +757,25 @@ class OpenAIProvider:
 
     async def generate(self, request: LLMRequest, *, fallback_used: bool = False) -> LLMResult:
         result = await self._generate(request)
-        self._log_usage(result, fallback_used=fallback_used)
+        self._log_usage(result, request, fallback_used=fallback_used)
         return result
+
+    def _blocked(self, start: float) -> LLMResult | None:
+        """A failure result if the call must not be sent at all, else None."""
+        if not self.is_available():
+            return self._failure("PERMANENT_ERROR", "missing_api_key", start)
+        if self._over_budget():
+            return self._failure("QUOTA_EXHAUSTED", "app_budget_exhausted", start)
+        return None
 
     async def _generate(self, request: LLMRequest) -> LLMResult:
         start = time.monotonic()
-        if not self.is_available():
-            return LLMResult(
-                status="PERMANENT_ERROR", error_type="missing_api_key", latency_ms=_elapsed_ms(start)
-            )
+        blocked = self._blocked(start)
+        if blocked is not None:
+            return blocked
 
         params = self._build_params(request, stream=False)
+        model = params["model"]
         max_attempts = max(1, self._settings.openai_max_retries + 1)
         error_type = "unknown_error"
 
@@ -640,15 +784,17 @@ class OpenAIProvider:
                 response = await self._send(params)
                 if getattr(response, "status", None) == "failed":
                     error = getattr(response, "error", None)
-                    status, error_type = self._classify_code(getattr(error, "code", None))
+                    status, error_type = self._classify_code(
+                        getattr(error, "code", None), model, getattr(error, "message", None)
+                    )
                     if status != "RETRYABLE_ERROR":
-                        return LLMResult(status=status, error_type=error_type, latency_ms=_elapsed_ms(start))
+                        return self._failure(status, error_type, start)
                 else:
                     return self._to_result(response, request, start)
             except Exception as exc:  # noqa: BLE001 -- classified below, never raised
-                status, error_type = self._classify_exception(exc)
+                status, error_type = self._classify_exception(exc, model)
                 if status != "RETRYABLE_ERROR":
-                    return LLMResult(status=status, error_type=error_type, latency_ms=_elapsed_ms(start))
+                    return self._failure(status, error_type, start)
 
             if attempt < max_attempts:
                 await asyncio.sleep(
@@ -656,7 +802,7 @@ class OpenAIProvider:
                 )
 
         logger.warning("OpenAI call failed after %d attempt(s): %s", max_attempts, error_type)
-        return LLMResult(status="RETRYABLE_ERROR", error_type=error_type, latency_ms=_elapsed_ms(start))
+        return self._failure("RETRYABLE_ERROR", error_type, start)
 
     async def generate_stream(
         self, request: LLMRequest, *, fallback_used: bool = False
@@ -670,15 +816,14 @@ class OpenAIProvider:
         failure is returned as-is.
         """
         start = time.monotonic()
-        if not self.is_available():
-            result = LLMResult(
-                status="PERMANENT_ERROR", error_type="missing_api_key", latency_ms=_elapsed_ms(start)
-            )
-            self._log_usage(result, fallback_used=fallback_used)
-            yield LLMStreamChunk(final=result)
+        blocked = self._blocked(start)
+        if blocked is not None:
+            self._log_usage(blocked, request, fallback_used=fallback_used)
+            yield LLMStreamChunk(final=blocked)
             return
 
         params = self._build_params(request, stream=True)
+        model = params["model"]
         max_attempts = max(1, self._settings.openai_max_retries + 1)
         emitted = False
         result: LLMResult | None = None
@@ -702,26 +847,35 @@ class OpenAIProvider:
                         final_response = event.response
                     elif event_type == "response.failed":
                         error = getattr(event.response, "error", None)
-                        failure = self._classify_code(getattr(error, "code", None))
+                        failure = self._classify_code(
+                            getattr(error, "code", None), model, getattr(error, "message", None)
+                        )
                     elif event_type == "error":
-                        failure = self._classify_code(getattr(event, "code", None))
+                        failure = self._classify_code(
+                            getattr(event, "code", None), model, getattr(event, "message", None)
+                        )
             except Exception as exc:  # noqa: BLE001 -- classified below, never raised
-                failure = self._classify_exception(exc)
+                failure = self._classify_exception(exc, model)
 
             if failure is None and final_response is not None:
                 result = self._to_result(final_response, request, start)
-                # The streamed text is what the user already saw -- keep the final
-                # result consistent with it.
-                result.text = "".join(text_parts) or result.text
+                streamed = "".join(text_parts)
+                if streamed:
+                    # The streamed text is what the user already saw -- keep the final
+                    # result consistent with it. Text reached them, so a truncated
+                    # (`incomplete`) reply still counts as an answer.
+                    result.text = streamed
+                    if result.status != "SUCCESS":
+                        result.status, result.error_type = "SUCCESS", None
                 break
 
             status, error_type = failure or ("RETRYABLE_ERROR", "stream_ended_without_result")
-            result = LLMResult(status=status, error_type=error_type, latency_ms=_elapsed_ms(start))
+            result = self._failure(status, error_type, start)
             if status != "RETRYABLE_ERROR" or emitted or attempt == max_attempts:
                 break
             await asyncio.sleep(self._settings.openai_retry_base_delay_seconds * (2 ** (attempt - 1)))
 
         assert result is not None  # the loop always runs at least once
         result.latency_ms = _elapsed_ms(start)
-        self._log_usage(result, fallback_used=fallback_used)
+        self._log_usage(result, request, fallback_used=fallback_used)
         yield LLMStreamChunk(final=result)

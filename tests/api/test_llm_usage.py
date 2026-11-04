@@ -247,7 +247,7 @@ def real_chain_client(test_db, monkeypatch, health_manager):
             ]
         )
 
-    settings = _quota_settings(openai_daily_budget_usd=1.0, openai_monthly_budget_usd=20.0)
+    settings = _quota_settings(openai_daily_budget_usd=1.0, ai_monthly_budget_usd=20.0)
     monkeypatch.setattr("app.api.routes.llm_usage.ProviderManager", stub_provider_manager)
     monkeypatch.setattr(
         "app.api.routes.llm_usage.QuotaManager", lambda *, db=None: QuotaManager(settings=settings, db=db)

@@ -19,15 +19,19 @@ AssistantCore ──> AIRouter ──> 1. OpenAI   (primary; Responses API, stor
 
 Gemini sits last and off because its free tier lets Google use submitted content to
 improve its products — it must never be a turn's *silent* failover target. OpenAI is
-metered by estimated **spend** (USD, from token counts × configured prices — see
-`QuotaManager`), Gemini by request count, Ollama not at all. Per-provider details:
+metered by estimated **spend** (USD, from token counts × `OPENAI_PRICES` against
+`AI_MONTHLY_BUDGET_USD` and a daily cap, checked before every call — see `QuotaManager`),
+Gemini by request count, Ollama not at all. Per-provider details:
 [`docs/llm-providers.md`](llm-providers.md).
 
-**OpenAI privacy invariants** (`OPENAI-RULES.md` (local); enforced in
-`backend/app/llm/openai.py` and again under the SDK by `backend/app/llm/openai_guard.py`,
-the only module that imports `openai`; tested in `tests/llm/test_openai_privacy.py` and
-`tests/llm/test_openai_guard.py`): every request carries `store=False`, built in one
-helper and sent through one other that refuses anything else; nothing server-side is
+**OpenAI rules** (`OPENAI-KEY-RULES.md` (local); enforced in `backend/app/llm/openai.py`
+and under the SDK by `backend/app/llm/openai_guard.py`, the one client and only module
+that imports `openai`; tested in `tests/llm/test_openai_spend.py`,
+`tests/llm/test_openai_privacy.py` and `tests/llm/test_openai_guard.py`): two model tiers
+from env (`OPENAI_MODEL_BULK` / `OPENAI_MODEL_QUALITY`; the chat uses quality); every
+call is budget-checked before it's sent, capped by `max_output_tokens`, and cost-logged
+(job, model, tokens, US$) after; billing stops are surfaced in the reply. Every request
+is built in one helper and sent through one other, with `store=False`; nothing server-side is
 referenced across requests (no `previous_response_id`, Conversations, Files, vector
 stores, Assistants or background mode); attachments are inline base64; `metadata` is
 never set. The prompt is laid out static-first for automatic prompt caching: fixed

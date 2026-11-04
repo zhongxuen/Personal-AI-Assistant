@@ -73,7 +73,7 @@ class ProviderUsageOut(BaseModel):
     unit: str | None
     used: float
     limit: float | None
-    # Same, for an optional monthly budget (OpenAI's `openai_monthly_budget_usd`);
+    # Same, for an optional monthly budget (OpenAI's `ai_monthly_budget_usd`);
     # both None when no monthly budget is configured.
     monthly_used: float | None = None
     monthly_limit: float | None = None

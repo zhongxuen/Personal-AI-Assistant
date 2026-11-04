@@ -1,29 +1,28 @@
 """
-The ONLY place allowed to talk to OpenAI. Do not loosen.
+The ONE OpenAI client (OPENAI-KEY-RULES.md rule 4, local). Do not loosen.
 
-Enforces the owner's OpenAI API key rules (`OPENAI-RULES.md` at the repo root, section 3)
-at the HTTP transport, below the SDK, so no caller -- and no future edit to
-`app.llm.openai` -- can send a request that breaks them:
+The only module that imports the `openai` package; everything else gets the client and
+the SDK's error types from here, and every call goes through `app.llm.openai`, which
+budget-checks and cost-logs it. `scripts/check_openai.py` (and the frontend's
+`scripts/check-openai.mjs`) fail the build if any other file imports `openai` or calls
+`api.openai.com` directly.
+
+Below the SDK, at the HTTP transport, so no future edit to `app.llm.openai` can get
+around it:
 
 1. Only `api.openai.com` and only the allowed endpoints (`ALLOWED`); anything else is
-   refused before it leaves the process.
-2. `store: false` is forced on `/responses` and `/chat/completions`.
-3. `metadata`, `user`, `safety_identifier` and `prompt_cache_key` are stripped.
-4. A request carrying `previous_response_id`, `conversation`, `prompt` or `background`
-   is refused (raised, never sent).
-5. A `/responses` reply that doesn't say `"store": false` fails the call. For a streamed
-   reply the check runs on the terminal `response.completed`/`response.incomplete`
-   event, and the stream raises there instead of handing that event to the SDK.
-
-This is also the only module that imports the `openai` package; everything else gets
-the client and the SDK's error types from here. `scripts/check_openai.py` fails the
-build if any other file imports `openai`, calls `api.openai.com` or sets `store=True`.
+   refused before it leaves the process (the key can't be sent anywhere else).
+2. `metadata`, `user`, `safety_identifier` and `prompt_cache_key` are stripped.
+3. A request carrying `previous_response_id`, `conversation`, `prompt` or `background`
+   is refused (raised, never sent) -- this app keeps no state on OpenAI's side.
+4. `store: false` is set on `/responses` and `/chat/completions`. The current key rules
+   allow storage, so this is no longer checked anywhere; it's kept because it is
+   harmless and nothing here needs a stored response.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 
 # The openai SDK (3.x) runs on its own `httpx2` package, not `httpx`, so the transport
 # must subclass httpx2's classes or the SDK's client won't accept it.
@@ -71,11 +70,9 @@ STORE_FLAG = {"/responses", "/chat/completions"}
 FORBIDDEN = ["previous_response_id", "conversation", "prompt", "background"]
 STRIPPED = ["metadata", "user", "safety_identifier", "prompt_cache_key"]
 
-_TERMINAL_EVENTS = {"response.completed", "response.incomplete"}
-
 
 class OpenAIPolicyError(Exception):
-    """A request or reply broke the OpenAI key rules. Never retried."""
+    """A request broke the guard's rules. Never retried."""
 
 
 def is_policy_error(exc: BaseException) -> bool:
@@ -91,43 +88,6 @@ def is_policy_error(exc: BaseException) -> bool:
 
 def _endpoint(path: str) -> str:
     return path.removeprefix("/v1").rstrip("/") or "/"
-
-
-def _check_stored(reply: object) -> None:
-    if not isinstance(reply, dict) or reply.get("store") is not False:
-        raise OpenAIPolicyError("OpenAI reported the response as stored")
-
-
-class _StoreCheckedStream(httpx.AsyncByteStream):
-    """A streamed `/responses` reply, passed through chunk by chunk, that raises on a
-    terminal event whose `response.store` isn't `false` (rule 5 for streaming)."""
-
-    def __init__(self, inner: httpx.AsyncByteStream) -> None:
-        self._inner = inner
-        self._buffer = b""
-
-    def _check_events(self) -> None:
-        self._buffer = self._buffer.replace(b"\r\n", b"\n")
-        while b"\n\n" in self._buffer:
-            event, self._buffer = self._buffer.split(b"\n\n", 1)
-            for line in event.split(b"\n"):
-                if not line.startswith(b"data:"):
-                    continue
-                try:
-                    data = json.loads(line[5:].strip())
-                except ValueError:
-                    continue
-                if isinstance(data, dict) and data.get("type") in _TERMINAL_EVENTS:
-                    _check_stored(data.get("response"))
-
-    async def __aiter__(self) -> AsyncIterator[bytes]:
-        async for chunk in self._inner:
-            self._buffer += chunk
-            self._check_events()
-            yield chunk
-
-    async def aclose(self) -> None:
-        await self._inner.aclose()
 
 
 class _GuardTransport(httpx.AsyncBaseTransport):
@@ -154,12 +114,7 @@ class _GuardTransport(httpx.AsyncBaseTransport):
         if ep in STORE_FLAG:
             body["store"] = False
 
-        streaming = body.get("stream") is True
         headers = [(k, v) for k, v in request.headers.multi_items() if k.lower() != "content-length"]
-        if streaming:
-            # The stream check reads the raw SSE bytes, so they must arrive uncompressed.
-            headers = [(k, v) for k, v in headers if k.lower() != "accept-encoding"]
-            headers.append(("accept-encoding", "identity"))
         safe = httpx.Request(
             request.method,
             request.url,
@@ -167,23 +122,7 @@ class _GuardTransport(httpx.AsyncBaseTransport):
             content=json.dumps(body).encode(),
             extensions=request.extensions,  # carries the per-request timeouts
         )
-        response = await self._inner.handle_async_request(safe)
-
-        if ep == "/responses" and 200 <= response.status_code < 300:
-            if streaming:
-                return httpx.Response(
-                    status_code=response.status_code,
-                    headers=response.headers,
-                    stream=_StoreCheckedStream(response.stream),
-                    extensions=response.extensions,
-                )
-            await response.aread()
-            try:
-                reply = response.json()
-            except ValueError:
-                reply = None
-            _check_stored(reply)
-        return response
+        return await self._inner.handle_async_request(safe)
 
     async def aclose(self) -> None:
         await self._inner.aclose()
@@ -192,7 +131,7 @@ class _GuardTransport(httpx.AsyncBaseTransport):
 def guarded_async_client(
     *, api_key: str, timeout: float, inner: httpx.AsyncBaseTransport | None = None
 ) -> AsyncOpenAI:
-    """THE way to get an OpenAI client. `inner` is a test seam (e.g. an
+    """THE way to get an OpenAI client (the one-client rule). `inner` is a test seam (e.g. an
     `httpx.MockTransport`); production always uses the real network transport.
 
     SDK retries are off: retry policy belongs to the caller (`app.llm.openai`), which

@@ -37,7 +37,7 @@ def test_all_tables_created():
 
 
 def test_ensure_columns_adds_new_nullable_columns_to_an_existing_table():
-    """An install whose llm_usage table predates cached_tokens/cost_usd gets them added
+    """An install whose llm_usage table predates cached_tokens/cost_usd/job gets them added
     in place at startup -- existing rows keep their data and read NULL for the new
     columns."""
     from sqlalchemy import create_engine
@@ -59,9 +59,9 @@ def test_ensure_columns_adds_new_nullable_columns_to_an_existing_table():
 
     added = ensure_columns(old)
 
-    assert set(added) == {"llm_usage.cached_tokens", "llm_usage.cost_usd"}
+    assert set(added) == {"llm_usage.cached_tokens", "llm_usage.cost_usd", "llm_usage.job"}
     columns = {c["name"] for c in inspect(old).get_columns("llm_usage")}
-    assert {"cached_tokens", "cost_usd"} <= columns
+    assert {"cached_tokens", "cost_usd", "job"} <= columns
     with old.connect() as conn:
         assert conn.execute(text("SELECT provider, cost_usd FROM llm_usage")).one() == ("gemini", None)
     # Idempotent: a second startup adds nothing.

@@ -1,10 +1,10 @@
 """
-Build gate for the OpenAI key rules (OPENAI-RULES.md section 4.2).
+Build gate for the one-client rule (OPENAI-KEY-RULES.md rule 4, local).
 
-Fails (exit 1) if any code file other than the guard imports the `openai` package,
-calls `api.openai.com` directly, or sets `store=True` / `store: true`. Runs before
-every Render build (`render.yaml` buildCommand) and in the test suite
-(`tests/llm/test_openai_gate.py`); the frontend has its own copy of the same check in
+Fails (exit 1) if any code file other than the guard imports the `openai` package or
+calls `api.openai.com` directly -- so every call goes through the one client, where it
+is budget-checked and cost-logged. Runs before every Render build (`render.yaml`
+buildCommand) and in the test suite (`tests/llm/test_openai_guard.py`); the frontend has its own copy of the same check in
 `frontend/scripts/check-openai.mjs`, run by `npm run build`.
 
     python backend/scripts/check_openai.py
@@ -19,11 +19,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # The guard and the guard's own tests -- nothing else. Adding to this list needs the
-# owner's approval (OPENAI-RULES.md).
+# owner's approval (OPENAI-KEY-RULES.md rule 4).
 ALLOWLIST = {
     "backend/app/llm/openai_guard.py",
     "tests/llm/test_openai_guard.py",
-    # Deliberately tampers with requests (store=True etc.) to prove they're refused.
+    # Drives the guard's transport against fake api.openai.com requests.
     "tests/llm/test_openai_privacy.py",
 }
 
@@ -34,7 +34,6 @@ RULES = [
     (re.compile(r"^\s*(import\s+openai\b|from\s+openai\b)", re.M), "imports the openai package"),
     (re.compile(r"""(from\s+|require\(\s*|import\(\s*)['"]openai(/[^'"]*)?['"]"""), "imports the openai package"),
     (re.compile(r"api\.openai\.com"), "calls api.openai.com directly"),
-    (re.compile(r"""['"]?\bstore['"]?\s*[=:]\s*(True|true)\b"""), "sets store=True"),
 ]
 
 
@@ -65,11 +64,11 @@ def find_violations(root: Path = REPO_ROOT) -> list[str]:
 def main() -> int:
     violations = find_violations()
     if violations:
-        print("OpenAI rules check FAILED (see OPENAI-RULES.md):", file=sys.stderr)
+        print("OpenAI one-client check FAILED (see OPENAI-KEY-RULES.md rule 4):", file=sys.stderr)
         for violation in violations:
             print(f"  {violation}", file=sys.stderr)
         return 1
-    print("OpenAI rules check passed.")
+    print("OpenAI one-client check passed.")
     return 0
 
 

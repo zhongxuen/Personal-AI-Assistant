@@ -90,6 +90,12 @@ class LLMRequest(BaseModel):
     # provider that can keep `tools` declared while forbidding calls (OpenAI's
     # tool_choice="none") should, so the cached prompt prefix stays identical.
     allow_tool_calls: bool = True
+    # Which model tier answers (OPENAI-KEY-RULES.md rule 5): "bulk" for cheap,
+    # high-volume work nobody reads directly (scoring, sorting, extraction), "quality"
+    # for anything a person reads. Unsure -> quality, hence the default.
+    tier: Literal["bulk", "quality"] = "quality"
+    # What this call is for, written to `llm_usage.job` with its cost (rule 4).
+    job: str = "assistant_chat"
 
     def context_with_tool_results(self) -> dict[str, Any]:
         """`context`, plus the results of any earlier tool-loop steps as plain data --
@@ -142,6 +148,12 @@ class LLMResult(BaseModel):
     # Input tokens served from the provider's prompt cache (a subset of
     # `request_tokens`), when the provider reports it. Billed at a lower rate.
     cached_tokens: int = 0
+    # Set when a call was stopped for money reasons the owner has to act on -- the
+    # app's own spend cap, OpenAI's `credit_balance_exhausted`, or a project/org hard
+    # limit -- as one plain sentence saying what happened and what to do. `AIRouter`
+    # carries it onto an exhausted-chain result so the reply says so instead of
+    # failing quietly behind a generic "provider unavailable".
+    spend_stop: str | None = None
 
 
 class LLMStreamChunk(BaseModel):

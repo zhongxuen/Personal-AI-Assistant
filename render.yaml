@@ -14,9 +14,9 @@ services:
     runtime: python
     plan: free
     rootDir: backend
-    # The OpenAI rules gate runs first: the build fails if any file other than
-    # app/llm/openai_guard.py imports `openai`, calls api.openai.com or sets store=True
-    # (OPENAI-RULES.md section 4.2).
+    # The OpenAI one-client gate runs first: the build fails if any file other than
+    # app/llm/openai_guard.py imports `openai` or calls api.openai.com
+    # (OPENAI-KEY-RULES.md rule 4, local).
     buildCommand: python scripts/check_openai.py && pip install -r requirements.txt
     # Render injects $PORT itself; main.py's own API_PORT/API_HOST settings only apply
     # when main.py is run directly (`python main.py`), not here -- uvicorn is invoked
@@ -59,19 +59,24 @@ services:
         sync: false
       - key: AUTH_SEED_PASSWORD
         sync: false
-      # Primary LLM provider: the owner's shared OpenAI project key (OPENAI-RULES.md --
-      # don't split it or create a new one). Every request goes through
-      # app/llm/openai_guard.py (store=False forced, banned fields stripped/refused).
-      # Never set VITE_-prefixed or otherwise ship this to the frontend.
+      # Primary LLM provider: this codebase's key in the owner's `personal` OpenAI
+      # project (data sharing off; OPENAI-KEY-RULES.md, local). Every request goes
+      # through app/llm/openai_guard.py, the one client. Never set VITE_-prefixed or
+      # otherwise ship this to the frontend.
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_ENABLED
         value: "true"
-      # Pinned so the deployed model is reviewable here. Must be a model the key can
-      # use (404 -> PERMANENT_ERROR -> sticky MISCONFIGURED). Keep the
-      # OPENAI_*_PRICE_PER_MTOK settings in sync with this model's pricing.
-      - key: OPENAI_MODEL
-        value: gpt-5.4-mini
+      # Two tiers, pinned so the deployed models are reviewable here. Each must be a
+      # model the key can use (404 -> PERMANENT_ERROR -> sticky MISCONFIGURED) and
+      # should be in app/llm/openai.py OPENAI_PRICES (else costed at the dearest price).
+      - key: OPENAI_MODEL_BULK
+        value: gpt-6-luna
+      - key: OPENAI_MODEL_QUALITY
+        value: gpt-6.1-terra
+      # Monthly app spend cap, below the `personal` project's US$10 hard limit on OpenAI.
+      - key: AI_MONTHLY_BUDGET_USD
+        value: "8"
       - key: OPENAI_DAILY_BUDGET_USD
         value: "1.00"
       # Gemini is opt-in only (free-tier data may be used by Google) -- kept out of

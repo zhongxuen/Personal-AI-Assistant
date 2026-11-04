@@ -39,6 +39,16 @@ logger = logging.getLogger(__name__)
 NO_PROVIDER_AVAILABLE_ERROR_TYPE = "no_provider_available"
 
 
+def _budget_skip_message(provider: str) -> str:
+    """Why a provider skipped for being over the app's own budget wasn't tried."""
+    if provider == "openai":
+        return (
+            "The app's own OpenAI spend cap (AI_MONTHLY_BUDGET_USD / OPENAI_DAILY_BUDGET_USD) "
+            "has been reached, so OpenAI calls are paused until it resets or is raised."
+        )
+    return f"The app's own usage budget for {provider} has been reached for now."
+
+
 class AIRouter:
     """Provider-agnostic failover across whatever chain `ProviderManager` hands back.
     Holds no provider-specific logic itself -- that all lives in the provider modules
@@ -74,10 +84,13 @@ class AIRouter:
         """
         chain = self._provider_manager.get_chain()
         attempts = 0
+        # Why a provider was stopped for money, if one was -- see LLMResult.spend_stop.
+        spend_stop: str | None = None
 
         for provider in chain:
             if not self._quota_manager.within_budget(provider.name):
                 logger.info("Skipping provider '%s': over its internal quota budget.", provider.name)
+                spend_stop = spend_stop or _budget_skip_message(provider.name)
                 continue
             if not self._health_manager.is_usable(provider.name):
                 logger.info("Skipping provider '%s': currently unhealthy.", provider.name)
@@ -90,6 +103,7 @@ class AIRouter:
 
             result = await provider.generate(request, fallback_used=fallback_used)
             self._health_manager.record_result(provider.name, result)
+            spend_stop = result.spend_stop or spend_stop
 
             if result.status == "SUCCESS":
                 # Stamp who actually answered -- only the router knows which chain entry
@@ -99,7 +113,9 @@ class AIRouter:
             # else: continue to the next provider in the chain.
 
         logger.warning("AIRouter exhausted the provider chain -- no provider available.")
-        return LLMResult(status="PERMANENT_ERROR", error_type=NO_PROVIDER_AVAILABLE_ERROR_TYPE)
+        return LLMResult(
+            status="PERMANENT_ERROR", error_type=NO_PROVIDER_AVAILABLE_ERROR_TYPE, spend_stop=spend_stop
+        )
 
     async def route_stream(self, request: LLMRequest) -> AsyncIterator[LLMStreamChunk]:
         """Streaming counterpart to `route()` -- identical chain walk, identical quota
@@ -120,10 +136,13 @@ class AIRouter:
         """
         chain = self._provider_manager.get_chain()
         attempts = 0
+        # Why a provider was stopped for money, if one was -- see LLMResult.spend_stop.
+        spend_stop: str | None = None
 
         for provider in chain:
             if not self._quota_manager.within_budget(provider.name):
                 logger.info("Skipping provider '%s': over its internal quota budget.", provider.name)
+                spend_stop = spend_stop or _budget_skip_message(provider.name)
                 continue
             if not self._health_manager.is_usable(provider.name):
                 logger.info("Skipping provider '%s': currently unhealthy.", provider.name)
@@ -155,6 +174,7 @@ class AIRouter:
                 )
 
             self._health_manager.record_result(provider.name, final)
+            spend_stop = final.spend_stop or spend_stop
 
             if final.status == "SUCCESS" or emitted_text:
                 self._stamp(final, provider)
@@ -166,7 +186,9 @@ class AIRouter:
         logger.warning("AIRouter exhausted the provider chain -- no provider available.")
         yield LLMStreamChunk(
             final=LLMResult(
-                status="PERMANENT_ERROR", error_type=NO_PROVIDER_AVAILABLE_ERROR_TYPE
+                status="PERMANENT_ERROR",
+                error_type=NO_PROVIDER_AVAILABLE_ERROR_TYPE,
+                spend_stop=spend_stop,
             )
         )
 

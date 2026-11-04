@@ -180,7 +180,10 @@ class DiagnosticsService:
             return CheckResult("llm_openai", label, True, "Disabled (OPENAI_ENABLED=false).")
         if not OpenAIProvider(settings=settings).is_available():
             return CheckResult("llm_openai", label, False, "OPENAI_API_KEY isn't configured.")
-        message = f"API key configured, model '{settings.openai_model}'."
+        message = (
+            f"API key configured, models: bulk '{settings.openai_model_bulk}', "
+            f"quality '{settings.openai_model_quality}'."
+        )
         if self._health_manager is not None:
             status = self._health_manager.get_status("openai")
             message = f"{message} Live health: {status.state.value}."

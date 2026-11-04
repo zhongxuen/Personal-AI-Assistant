@@ -42,5 +42,8 @@ Thumbs.db
 # Playwright MCP browser-session snapshots/logs
 .playwright-mcp/
 
-# Owner's OpenAI key rules -- kept local on purpose (names the org and other projects; repo is public)
+# Owner's OpenAI key rules -- kept local on purpose (names the org, project IDs and billing
+# setup; repo is public). CLAUDE.md @-imports it locally.
+OPENAI-KEY-RULES.md
+# The retired predecessor, in case an old copy is ever dropped back in.
 OPENAI-RULES.md

@@ -65,9 +65,11 @@ Set these on the **backend host** (Render dashboard → service → Environment)
 | `ASSISTANT_TIMEZONE` | yes (deployed) | IANA name of **the user's** timezone, e.g. `Asia/Kuala_Lumpur`. Render containers run in UTC, so without this the assistant answers "what time is it" hours off (with a right-looking date) and parses "remind me tomorrow at 8pm" into the wrong zone. Pinned in `render.yaml`; the code default matches. Set to an empty value only for a desktop install, where the host clock *is* the user's clock. |
 | `AUTH_SECRET_KEY` | yes | Long random value, **not** the shipped dev default. Generate: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. |
 | `AUTH_SEED_USERNAME` / `AUTH_SEED_PASSWORD` | yes (or you can't log in) | One-time bootstrap user, created at startup if it doesn't already exist. |
-| `OPENAI_API_KEY` | yes, for LLM features | The primary provider. Unset → `OpenAIProvider.is_available()` is `False`, not an error (deterministic tool routing still works). The owner's shared key — see [OpenAI setup](#openai-setup-privacy-and-spend) and `OPENAI-RULES.md`. |
-| `OPENAI_MODEL` | no | Pinned to `gpt-5.4-mini` in `render.yaml` (same as the code default). Must be a model the key can use — a 404 becomes a sticky `MISCONFIGURED`, same as Gemini's [model_not_found](#a-provider-says-misconfigured--model_not_found). Keep the `OPENAI_*_PRICE_PER_MTOK` settings in sync with this model's pricing. |
-| `OPENAI_DAILY_BUDGET_USD` / `OPENAI_MONTHLY_BUDGET_USD` | no | Internal spend budget (default $1.00/day, no monthly cap). At 100% the app stops calling OpenAI and fails over. Keep it below the hard budget on the OpenAI project. |
+| `OPENAI_API_KEY` | yes, for LLM features | The primary provider. Unset → `OpenAIProvider.is_available()` is `False`, not an error (deterministic tool routing still works). This codebase's key in the owner's `personal` OpenAI project — see [OpenAI setup](#openai-setup-privacy-and-spend) and `OPENAI-KEY-RULES.md` (local). |
+| `OPENAI_MODEL_BULK` / `OPENAI_MODEL_QUALITY` | no | The two model tiers, pinned in `render.yaml` to `gpt-6-luna` / `gpt-6.1-terra` (same as the code defaults). The chat uses the quality tier. Each must be a model the key can use — a 404 becomes a sticky `MISCONFIGURED`, same as Gemini's [model_not_found](#a-provider-says-misconfigured--model_not_found). A model missing from `OPENAI_PRICES` in `backend/app/llm/openai.py` is costed at the dearest listed price. |
+| `AI_MONTHLY_BUDGET_USD` | no | The app's own monthly OpenAI spend cap (default and `render.yaml`: `8`), checked before every call. Keep it below the `personal` project's US$10 hard limit on OpenAI. |
+| `OPENAI_DAILY_BUDGET_USD` | no | Extra daily cap (default $1.00). At 100% of either cap the app stops calling OpenAI and the chat reply says why. |
+| `OPENAI_MAX_OUTPUT_TOKENS` | no | Cap on every reply (default 4096); reasoning tokens count toward it. |
 | `STORAGE_EPHEMERAL` | no | `true` in `render.yaml`. Makes `/api/health` report `storage_mode: "ephemeral"`, which shows the "temporary server" notice in the web app. Auto-detected from Render's own `RENDER` env var if unset. |
 | `GEMINI_ENABLED` | no | `false` (default, and pinned in `render.yaml`). Gemini's free tier lets Google use submitted content, so it's opt-in only. |
 | `GEMINI_API_KEY` | only if `GEMINI_ENABLED=true` | Unset → `GeminiProvider.is_available()` is `False`, not an error. |
@@ -85,39 +87,41 @@ Set on the **frontend host** (Vercel → project → Settings → Environment Va
 
 ## OpenAI setup (privacy and spend)
 
-**The owner's OpenAI key rules in `OPENAI-RULES.md` (repo root; kept local, gitignored) are final and
-override anything here.** In short: the OpenAI dashboard may show only the model, token
-usage and cost -- never the project name, the task, or any content.
+**The owner's OpenAI key rules in `OPENAI-KEY-RULES.md` (repo root; kept local, gitignored)
+win over anything here.** In short: this codebase uses its own key in the owner's
+`personal` OpenAI project, where data sharing for training is always off; storage and
+dashboard logs are allowed; every call goes through one client that budget-checks and
+cost-logs it.
 
-The code side is fixed and enforced twice:
+The code side:
 
-- `backend/app/llm/openai_guard.py` is the **only** module that imports `openai`. Its
-  HTTP transport sits under the SDK and allows only `api.openai.com` and
-  `POST /v1/responses`, `/chat/completions`, `/embeddings`, `/moderations`. It forces
-  `store: false`, strips `metadata` / `user` / `safety_identifier` / `prompt_cache_key`,
-  refuses `previous_response_id` / `conversation` / `prompt` / `background`, and fails
-  any `/responses` reply (streamed or not) that isn't marked `"store": false`.
-- `app/llm/openai.py` builds requests that already follow those rules (history and
-  attachments inline, nothing referenced across requests) and treats a guard refusal
-  as a permanent, never-retried error.
+- `backend/app/llm/openai_guard.py` is the **only** module that imports `openai` (the
+  one client). Its HTTP transport sits under the SDK and allows only `api.openai.com`
+  and `POST /v1/responses`, `/chat/completions`, `/embeddings`, `/moderations`. It
+  strips `metadata` / `user` / `safety_identifier` / `prompt_cache_key`, refuses
+  `previous_response_id` / `conversation` / `prompt` / `background`, and sends
+  `store: false` (no longer required, kept because nothing needs storing).
+- `app/llm/openai.py` picks the model by tier, checks the app's spend cap **before**
+  every call, sets `max_output_tokens`, and writes job, model, tokens and estimated
+  cost to `llm_usage` after it.
 - **Build gates**: `backend/scripts/check_openai.py` runs first in Render's
   `buildCommand`, and `frontend/scripts/check-openai.mjs` runs as `prebuild` on every
   `npm run build` (Vercel included). Either fails the build if any non-guard file
-  imports `openai`, calls `api.openai.com` or sets `store=True`. Both are also covered
-  by `tests/llm/test_openai_guard.py`.
+  imports `openai` or calls `api.openai.com`. Both are also covered by
+  `tests/llm/test_openai_guard.py`.
 
 The account side:
 
-1. **The key** is the owner's existing shared project key (`sk-proj-...`). It is
-   deliberately shared across several projects; **don't split it or create a new key /
-   OpenAI project** for this app.
-2. **Spend is tracked here, not on OpenAI**: every call writes tokens + estimated cost
-   to `llm_usage`, metered against `OPENAI_DAILY_BUDGET_USD` (and optional
-   `OPENAI_MONTHLY_BUDGET_USD`). At 100% the app stops calling OpenAI and fails over.
-   Keep the `OPENAI_*_PRICE_PER_MTOK` settings in sync with the model's real pricing.
-3. **Known, accepted limit**: OpenAI keeps API traffic for up to 30 days for abuse
-   monitoring (standard policy). It isn't on the dashboard and isn't used for training
-   by default; only Zero Data Retention would remove it, and that hasn't been requested.
+1. **The key** belongs to this codebase only (one key per codebase inside the
+   `personal` project, named after it, so it can be revoked alone). The owner creates
+   it on platform.openai.com; never print, log or commit it.
+2. **Spend is capped twice**: here, by `AI_MONTHLY_BUDGET_USD` (US$8) and
+   `OPENAI_DAILY_BUDGET_USD`, metered from `llm_usage.cost_usd`; and on OpenAI, by the
+   project's US$10 hard limit. The app's cap is lower so it stops first and says so.
+3. **Billing stops are surfaced, not swallowed**: `credit_balance_exhausted`,
+   `insufficient_quota` and hard spend-limit errors are logged at ERROR, recorded as
+   `billing:<code>` in `llm_usage`, and the chat reply tells you what to top up or raise.
+   The same goes for the app's own cap (`app_budget_exhausted`).
 4. **Set the key on each backend**: `OPENAI_API_KEY` in your local `.env` for the
    desktop install, and in Render → `jarvis-api` → Environment for the deployed one
    (it's a `sync: false` key in `render.yaml`, so Render prompts for it on a new
@@ -331,8 +335,8 @@ a stuck login (wrong `AUTH_SEED_*` values, or `VITE_API_BASE_URL` pointed at the
 
 ### A provider says MISCONFIGURED — `model_not_found`
 
-The walkthrough below is for Gemini; OpenAI behaves identically with `OPENAI_MODEL` /
-`OPENAI_API_KEY` (list what a key can reach with
+The walkthrough below is for Gemini; OpenAI behaves identically with `OPENAI_MODEL_BULK` /
+`OPENAI_MODEL_QUALITY` / `OPENAI_API_KEY` (list what a key can reach with
 `python -c "from openai import OpenAI; print(sorted(m.id for m in OpenAI(api_key='YOUR_KEY').models.list()))"`).
 
 Symptom: chat answers every non-deterministic message with *"I can't reach any reasoning provider
@@ -386,7 +390,9 @@ Fix:
 - **Data lives only on the device running the backend — no cross-device sync.** All
   conversations, memory and attachments are stored on the machine running the JARVIS
   backend (SQLite + `backend/data/attachments/`). Nothing is synced to a cloud store or kept
-  online, and nothing is retained by OpenAI (`store=False`). The consequence: using JARVIS
+  online. Requests to OpenAI go out with `store=False` and the `personal` project has data
+  sharing for training turned off (OpenAI may still keep API traffic briefly for abuse
+  monitoring, per its standard policy). The consequence: using JARVIS
   from another device through the deployed site talks to the Render backend, a
   **temporary server** — its conversations, memory and files are wiped on every
   restart/redeploy (and on the periodic restart free instances get after idling), and they

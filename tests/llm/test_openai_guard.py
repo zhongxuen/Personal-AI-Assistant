@@ -1,6 +1,6 @@
 """
 The OpenAI transport guard (`app.llm.openai_guard`) and the build gate
-(`backend/scripts/check_openai.py`) -- OPENAI-RULES.md sections 3 and 4.
+(`backend/scripts/check_openai.py`) -- the one-client rule, OPENAI-KEY-RULES.md rule 4.
 
 Real SDK calls go through the real guard; only the network underneath is an
 `httpx.MockTransport`, which records exactly what would have left the process.
@@ -123,12 +123,13 @@ async def test_endpoints_outside_the_allow_list_are_refused():
 
 
 @pytest.mark.asyncio
-async def test_a_reply_not_marked_unstored_fails_the_call():
+async def test_a_reply_marked_stored_is_accepted():
+    # Storage is allowed under OPENAI-KEY-RULES.md rule 2: the old "reply must say
+    # store: false" check is gone. We still *send* store=False.
     for store in (True, None):
         network = _Network(lambda r, s=store: httpx.Response(200, json=_reply(store=s)))
-        with pytest.raises(Exception) as info:
-            await _client(network).responses.create(model="gpt-test", input="hi")
-        assert is_policy_error(info.value)
+        await _client(network).responses.create(model="gpt-test", input="hi")
+        assert json.loads(network.sent[0].content)["store"] is False
 
 
 @pytest.mark.asyncio
@@ -144,7 +145,7 @@ def _sse(*events: dict) -> bytes:
 
 
 @pytest.mark.asyncio
-async def test_streamed_reply_passes_when_unstored_and_fails_when_stored():
+async def test_streamed_reply_passes_through_whatever_its_store_flag():
     delta = {"type": "response.output_text.delta", "delta": "hi", "item_id": "m", "output_index": 0,
              "content_index": 0, "sequence_number": 1, "logprobs": []}
 
@@ -154,24 +155,19 @@ async def test_streamed_reply_passes_when_unstored_and_fails_when_stored():
             200, headers={"content-type": "text/event-stream"}, content=_sse(delta, completed)
         )
 
-    ok = _Network(stream_reply(False))
-    events = [e async for e in await _client(ok).responses.create(model="gpt-test", input="hi", stream=True)]
-    assert [e.type for e in events] == ["response.output_text.delta", "response.completed"]
-    assert ok.sent[0].headers["accept-encoding"] == "identity"
-
-    stored = _Network(stream_reply(True))
-    with pytest.raises(Exception) as info:
-        async for _ in await _client(stored).responses.create(model="gpt-test", input="hi", stream=True):
-            pass
-    assert is_policy_error(info.value)
+    for store in (False, True):
+        network = _Network(stream_reply(store))
+        stream = await _client(network).responses.create(model="gpt-test", input="hi", stream=True)
+        events = [e async for e in stream]
+        assert [e.type for e in events] == ["response.output_text.delta", "response.completed"]
 
 
 def test_provider_treats_a_guard_refusal_as_permanent():
     provider = OpenAIProvider(settings=Settings(_env_file=None, openai_api_key="k"))
     wrapped = APIConnectionError(request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
     wrapped.__cause__ = OpenAIPolicyError("nope")
-    assert provider._classify_exception(wrapped) == ("PERMANENT_ERROR", "privacy_guard")
-    assert provider._classify_exception(OpenAIPolicyError("nope")) == ("PERMANENT_ERROR", "privacy_guard")
+    assert provider._classify_exception(wrapped, "gpt-test") == ("PERMANENT_ERROR", "privacy_guard")
+    assert provider._classify_exception(OpenAIPolicyError("nope"), "gpt-test") == ("PERMANENT_ERROR", "privacy_guard")
 
 
 def test_build_gate_passes_on_this_repo():
@@ -192,8 +188,7 @@ def test_build_gate_catches_a_direct_import(tmp_path):
         "calls api.openai.com directly",
         "imports the openai package",
         "imports the openai package",
-        "sets store=True",
-    ]
+    ]  # store=True is no longer flagged (OPENAI-KEY-RULES.md, "Switching", step 4)
 
 
 def test_connection_error_log_masks_keys(caplog):
@@ -201,6 +196,6 @@ def test_connection_error_log_masks_keys(caplog):
     exc = APIConnectionError(request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
     exc.__cause__ = ValueError("Illegal header value b'Bearer sk-proj-SECRET123\n'")
     with caplog.at_level("WARNING"):
-        assert provider._classify_exception(exc) == ("RETRYABLE_ERROR", "network_error:ValueError")
+        assert provider._classify_exception(exc, "gpt-test") == ("RETRYABLE_ERROR", "network_error:ValueError")
     assert "SECRET123" not in caplog.text
     assert "Illegal header value" in caplog.text

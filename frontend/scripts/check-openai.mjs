@@ -1,6 +1,6 @@
-// Build gate for the OpenAI key rules (OPENAI-RULES.md section 4.2), frontend half.
+// Build gate for the one-client rule (OPENAI-KEY-RULES.md rule 4, local), frontend half.
 // Runs as `prebuild`, so every `npm run build` (including Vercel's) fails if frontend
-// code imports the `openai` package, calls api.openai.com, or sets store: true. The
+// code imports the `openai` package or calls api.openai.com. The
 // frontend never talks to OpenAI at all -- only the backend's guard does
 // (backend/app/llm/openai_guard.py; backend gate: backend/scripts/check_openai.py).
 import { readdirSync, readFileSync, statSync } from "node:fs";
@@ -15,7 +15,6 @@ const SELF = "scripts/check-openai.mjs";
 const RULES = [
   [/(from\s+|require\(\s*|import\(\s*)['"]openai(\/[^'"]*)?['"]/g, "imports the openai package"],
   [/api\.openai\.com/g, "calls api.openai.com directly"],
-  [/['"]?\bstore['"]?\s*[=:]\s*(True|true)\b/g, "sets store: true"],
 ];
 
 function* files(dir) {
@@ -41,8 +40,8 @@ for (const path of files(root)) {
 }
 
 if (violations.length) {
-  console.error("OpenAI rules check FAILED (see OPENAI-RULES.md):");
+  console.error("OpenAI one-client check FAILED (see OPENAI-KEY-RULES.md rule 4):");
   for (const v of violations) console.error(`  ${v}`);
   process.exit(1);
 }
-console.log("OpenAI rules check passed.");
+console.log("OpenAI one-client check passed.");

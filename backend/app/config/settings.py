@@ -72,16 +72,22 @@ class Settings(BaseSettings):
     # convention as gemini_api_key below. `openai_enabled` is the operator-facing switch
     # ProviderManager reads to include it in the chain at all.
     #
-    # Privacy is not configurable here on purpose: every request goes through
-    # OpenAIProvider._build_params, which always sends store=False and never uses
-    # previous_response_id / conversations / file uploads (see app/llm/openai.py).
+    # The key belongs to the owner's `personal` OpenAI project (data sharing off) --
+    # rules in OPENAI-KEY-RULES.md (local, gitignored). Every request goes through
+    # OpenAIProvider._build_params and the one client in app/llm/openai_guard.py.
     openai_enabled: bool = True
     openai_api_key: str | None = None
-    # Must be a model OPENAI_API_KEY can actually use -- an unknown/retired name answers
-    # HTTP 404, which OpenAIProvider classifies as PERMANENT_ERROR
-    # (`model_not_found:<model>`) and HealthManager turns into a sticky MISCONFIGURED.
-    # A small, cost-effective general model by default; swap via env, not code (§30).
-    openai_model: str = "gpt-5.4-mini"
+    # Two model tiers (OPENAI-KEY-RULES.md rule 5), swapped via env, not code. Each
+    # request names its tier (`LLMRequest.tier`); unsure -> quality. Must be models
+    # OPENAI_API_KEY can use -- an unknown/retired name answers HTTP 404, which
+    # OpenAIProvider classifies as PERMANENT_ERROR (`model_not_found:<model>`) and
+    # HealthManager turns into a sticky MISCONFIGURED. A model missing from
+    # `app.llm.openai.OPENAI_PRICES` still works but is costed at the dearest price.
+    openai_model_bulk: str = "gpt-6-luna"  # scoring, sorting, extraction
+    openai_model_quality: str = "gpt-6.1-terra"  # anything a person reads
+    # Hard cap on every reply (rule 6). On reasoning models the hidden reasoning
+    # tokens count toward it too, so it leaves room beyond the visible answer.
+    openai_max_output_tokens: int = 4096
     openai_timeout_seconds: float = 30.0
     # Same *retry count* convention as gemini_max_retries: RETRYABLE_ERROR only, and
     # never after a streamed reply has started emitting text.
@@ -92,21 +98,16 @@ class Settings(BaseSettings):
     openai_reasoning_effort: str | None = None
 
     # OpenAI spend budget. Metered in USD, not requests -- QuotaManager sums
-    # `llm_usage.cost_usd` for today (and this month, if a monthly budget is set) and
-    # applies the same NORMAL/WARNING/CRITICAL/FAILOVER thresholds Gemini's request
-    # budget uses. Keep these BELOW any hard cap set on the OpenAI project itself, so
-    # the app fails over to Ollama before OpenAI starts rejecting calls.
+    # `llm_usage.cost_usd` (token counts x `app.llm.openai.OPENAI_PRICES`) for today
+    # and this month, applies the same NORMAL/WARNING/CRITICAL/FAILOVER thresholds
+    # Gemini's request budget uses, and every OpenAI call is checked against it before
+    # it is sent. The monthly cap (OPENAI-KEY-RULES.md rule 4) must sit BELOW the
+    # `personal` project's hard limit on OpenAI (US$10), so the app stops and says so
+    # before OpenAI starts rejecting calls. <= 0 means "no OpenAI calls at all".
+    ai_monthly_budget_usd: float = 8.00
     openai_daily_budget_usd: float = 1.00
-    openai_monthly_budget_usd: float | None = None
     openai_warning_threshold: float = 0.80
     openai_critical_threshold: float = 0.90
-    # Per-million-token prices used to estimate `cost_usd` for each call. These are
-    # placeholders for `openai_model` -- NOT read from OpenAI. Keep them in sync with
-    # https://openai.com/api/pricing for whichever model is configured; a stale price
-    # makes the spend bar (and the budget it enforces) wrong in either direction.
-    openai_input_price_per_mtok: float = 0.75
-    openai_cached_input_price_per_mtok: float = 0.075
-    openai_output_price_per_mtok: float = 4.50
 
     # Tool-result loop (AssistantCore). After the model asks for tools, their results
     # are sent back so it can answer from what actually happened. This caps how many

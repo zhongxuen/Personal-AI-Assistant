@@ -229,6 +229,9 @@ class LLMUsage(Base):
     # Providers that don't report either leave them NULL.
     cached_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # What the call was for (`LLMRequest.job`, e.g. "assistant_chat") -- the "job" in
+    # OPENAI-KEY-RULES.md rule 4's cost log. Same late-added, nullable shape as above.
+    job: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
 class ToolExecutionLog(Base):

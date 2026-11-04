@@ -39,22 +39,27 @@ and you'd rather not pay the (short-timeout) probe on every request; leave it `t
 
 ## OpenAI (`OpenAIProvider`)
 
-- Config: `OPENAI_API_KEY`, `OPENAI_MODEL` (default `gpt-5.4-mini` -- must be a model the
-  key can use), `OPENAI_TIMEOUT_SECONDS` (30), `OPENAI_MAX_RETRIES` (1),
-  `OPENAI_RETRY_BASE_DELAY_SECONDS` (0.4), optional `OPENAI_REASONING_EFFORT`.
-- **Privacy, enforced in code** (`OPENAI-RULES.md` (local); tests:
-  `tests/llm/test_openai_privacy.py`, `tests/llm/test_openai_guard.py`). Every request
-  also passes through `app/llm/openai_guard.py` -- the only module importing `openai` --
-  whose transport allows only the listed endpoints, forces `store: false`, strips
-  `metadata`/`user`/`safety_identifier`/`prompt_cache_key`, refuses stored-state fields
-  and fails any reply not marked `store: false`. On top of that, every call
-  uses the Responses API with `store=False`, built by one helper (`_build_params`) and
-  sent by one other (`_send`, which refuses anything else). No `previous_response_id`,
-  Conversations API, Files API, vector stores, Assistants/threads or background mode --
-  history is resent by us on every request, attachments go inline as base64
-  (`input_file`/`input_image`), and `metadata` is never set. Multi-step tool use with a
-  reasoning model works statelessly via `include=["reasoning.encrypted_content"]`: we
-  hold the encrypted reasoning items and replay them on the next step.
+- Config: `OPENAI_API_KEY` (this codebase's key in the owner's `personal` project),
+  `OPENAI_MODEL_BULK` (default `gpt-6-luna`) and `OPENAI_MODEL_QUALITY` (default
+  `gpt-6.1-terra`) -- each request picks one via `LLMRequest.tier` (default quality; the
+  chat uses quality) -- `OPENAI_MAX_OUTPUT_TOKENS` (4096, sent on every call; reasoning
+  tokens count toward it), `OPENAI_TIMEOUT_SECONDS` (30), `OPENAI_MAX_RETRIES` (1),
+  `OPENAI_RETRY_BASE_DELAY_SECONDS` (0.4), optional `OPENAI_REASONING_EFFORT`. No
+  `temperature` is sent (newer models reject it).
+- **Rules, enforced in code** (`OPENAI-KEY-RULES.md` (local); tests:
+  `tests/llm/test_openai_spend.py`, `tests/llm/test_openai_privacy.py`,
+  `tests/llm/test_openai_guard.py`). Every request passes through
+  `app/llm/openai_guard.py` -- the one client, and the only module importing `openai` --
+  whose transport allows only the listed endpoints, strips
+  `metadata`/`user`/`safety_identifier`/`prompt_cache_key` and refuses stored-state
+  fields. Requests use the Responses API, built by one helper (`_build_params`) and sent
+  by one other (`_send`), with `store=False` (no longer required, still sent). No
+  `previous_response_id`, Conversations API, Files API, vector stores, Assistants/threads
+  or background mode -- history is resent by us on every request, attachments go inline
+  as base64 (`input_file`/`input_image`), and `metadata` is never set. Multi-step tool
+  use with a reasoning model works statelessly via
+  `include=["reasoning.encrypted_content"]`: we hold the encrypted reasoning items and
+  replay them on the next step.
 - Prompt layout is static-first so OpenAI's automatic prompt caching applies: fixed
   `instructions` -> tools (strict, sorted by name) -> a developer message with the
   per-request context (time, platform, memory) -> recent turns as real user/assistant
@@ -64,16 +69,23 @@ and you'd rather not pay the (short-timeout) probe on every request; leave it `t
   required, originally-optional properties made nullable (nulls are dropped again
   before `ToolExecutor` sees the call). A free-form object property, which strict mode
   can't express, travels as a JSON-encoded string and is decoded back.
-- Error classification mirrors Gemini's: 429 / `insufficient_quota` -> `QUOTA_EXHAUSTED`;
-  timeout / connection error / 5xx -> `RETRYABLE_ERROR` (retried with backoff; when
-  streaming, only until the first delta); 404 -> `PERMANENT_ERROR`
-  `model_not_found:<OPENAI_MODEL>`; 400/401/403 -> `PERMANENT_ERROR`.
-- **Budget is spend, not requests.** Each `llm_usage` row carries `cost_usd`, estimated
-  from token counts x `OPENAI_INPUT_PRICE_PER_MTOK` / `OPENAI_CACHED_INPUT_PRICE_PER_MTOK`
-  / `OPENAI_OUTPUT_PRICE_PER_MTOK`. Those prices are placeholders -- keep them in sync
-  with OpenAI's pricing page for the configured model. `QuotaManager` sums today's (and,
-  if `OPENAI_MONTHLY_BUDGET_USD` is set, this month's) cost against
-  `OPENAI_DAILY_BUDGET_USD` with the usual NORMAL/WARNING/CRITICAL/FAILOVER thresholds.
+- Error classification mirrors Gemini's: 429 rate limit -> `QUOTA_EXHAUSTED`;
+  `credit_balance_exhausted` / `insufficient_quota` / hard spend-limit errors ->
+  `QUOTA_EXHAUSTED` `billing:<code>`, logged at ERROR and explained in the chat reply
+  (`LLMResult.spend_stop`); timeout / connection error / 5xx -> `RETRYABLE_ERROR`
+  (retried with backoff; when streaming, only until the first delta); 404 ->
+  `PERMANENT_ERROR` `model_not_found:<model>`; 400/401/403 -> `PERMANENT_ERROR`; an
+  `incomplete` reply with no text (reasoning used up `max_output_tokens`) ->
+  `PERMANENT_ERROR` `incomplete:<reason>`, with its tokens and cost still logged.
+- **Budget is spend, not requests.** Each `llm_usage` row carries `job`, `model` and
+  `cost_usd`, estimated from token counts x `OPENAI_PRICES` in `app/llm/openai.py`
+  (gpt-6-luna US$0.10/0.50, gpt-6.1-terra US$1/5 per 1M in/out; cached input is costed
+  at the full input price; a model not in the table is costed at the dearest listed
+  price). `QuotaManager` sums today's and this month's cost (every row, whatever its
+  status) against `OPENAI_DAILY_BUDGET_USD` and `AI_MONTHLY_BUDGET_USD` with the usual
+  NORMAL/WARNING/CRITICAL/FAILOVER thresholds. `OpenAIProvider` runs that check itself
+  before every call (as well as `AIRouter`), so a call over the cap is never sent; the
+  reply says the cap was reached.
 - It is the only provider with `supports_tool_loop = True`: `AssistantCore` sends tool
   results back to it until it answers in text or `LLM_MAX_TOOL_STEPS` rounds have run.
 

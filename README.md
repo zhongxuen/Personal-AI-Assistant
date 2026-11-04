@@ -24,8 +24,9 @@ docs/            Architecture, security, deployment notes
 
 - Python 3.12
 - Node.js 22+
-- An OpenAI API key (`OPENAI_API_KEY` in `.env`) for the primary LLM provider — the owner's
-  shared key, used only under `OPENAI-RULES.md` (local); see [`docs/deployment.md`](docs/deployment.md#openai-setup-privacy-and-spend)
+- An OpenAI API key (`OPENAI_API_KEY` in `.env`) for the primary LLM provider — this
+  codebase's key in the owner's `personal` OpenAI project, used only under
+  `OPENAI-KEY-RULES.md` (local); see [`docs/deployment.md`](docs/deployment.md#openai-setup-privacy-and-spend)
 - Optional: [Ollama](https://ollama.com) running locally as the LLM fallback
 
 ## Setup

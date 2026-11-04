@@ -12,9 +12,9 @@ A provider's budget is metered in one of two units:
 
   - `"requests"` -- Gemini (`gemini_daily_request_budget`): a count of billable calls
     today, shadowing a free tier's daily request quota.
-  - `"usd"` -- OpenAI (`openai_daily_budget_usd`, optionally
-    `openai_monthly_budget_usd`): the sum of `llm_usage.cost_usd` (estimated by
-    `OpenAIProvider` from token counts x configured prices) today / this month. A paid
+  - `"usd"` -- OpenAI (`openai_daily_budget_usd` and `ai_monthly_budget_usd`, the
+    OPENAI-KEY-RULES.md rule 4 cap): the sum of `llm_usage.cost_usd` (estimated by
+    `OpenAIProvider` from token counts x `OPENAI_PRICES`) today / this month. A paid
     API's real limit is money, not request count -- one long tool-loop turn can cost
     more than fifty short ones.
 
@@ -56,8 +56,12 @@ _STATUS_SEVERITY: dict[QuotaStatus, int] = {"NORMAL": 0, "WARNING": 1, "CRITICAL
 #
 # Everything else still counts: SUCCESS obviously, QUOTA_EXHAUSTED because it's the
 # provider itself saying we spent the quota, and RETRYABLE_ERROR because a timeout or
-# 5xx may well have been metered server-side before it failed. (For the USD unit this
-# filter changes nothing in practice -- a failed call logs zero tokens, so zero cost.)
+# 5xx may well have been metered server-side before it failed.
+#
+# The USD unit does NOT apply this filter: `cost_usd` is already the real spend, and a
+# call can fail *after* it was billed (a reasoning model that used up
+# `max_output_tokens` before writing any text is logged as a PERMANENT_ERROR with its
+# tokens and cost). Filtering by status there would let the monthly cap undercount.
 _UNBILLED_STATUSES = ("PERMANENT_ERROR",)
 
 
@@ -121,7 +125,7 @@ class QuotaManager:
             return _Meter(
                 unit="usd",
                 daily_limit=s.openai_daily_budget_usd,
-                monthly_limit=s.openai_monthly_budget_usd,
+                monthly_limit=s.ai_monthly_budget_usd,
                 warning_threshold=s.openai_warning_threshold,
                 critical_threshold=s.openai_critical_threshold,
             )
@@ -148,13 +152,17 @@ class QuotaManager:
     def _usage_since(self, provider: str, since: datetime, unit: QuotaUnit) -> float:
         if self._db is None:
             return 0
-        query = self._db.query(
-            func.coalesce(func.sum(LLMUsage.cost_usd), 0.0) if unit == "usd" else func.count(LLMUsage.id)
-        ).filter(
-            LLMUsage.provider == provider,
-            LLMUsage.timestamp >= since,
-            LLMUsage.status.notin_(_UNBILLED_STATUSES),
-        )
+        if unit == "usd":
+            # Every row's cost counts, whatever its status (see `_UNBILLED_STATUSES`).
+            query = self._db.query(func.coalesce(func.sum(LLMUsage.cost_usd), 0.0)).filter(
+                LLMUsage.provider == provider, LLMUsage.timestamp >= since
+            )
+        else:
+            query = self._db.query(func.count(LLMUsage.id)).filter(
+                LLMUsage.provider == provider,
+                LLMUsage.timestamp >= since,
+                LLMUsage.status.notin_(_UNBILLED_STATUSES),
+            )
         value = query.scalar() or 0
         return float(value) if unit == "usd" else int(value)
 

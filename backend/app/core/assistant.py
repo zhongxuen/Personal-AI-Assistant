@@ -377,10 +377,15 @@ class AssistantCore:
         same "nothing could answer" situation as an exhausted chain.
         """
         if result is None or result.error_type == NO_PROVIDER_AVAILABLE_ERROR_TYPE:
-            return AssistantResponse(text=_NO_PROVIDER_AVAILABLE_MESSAGE, used_llm=False)
-        message = _LLM_UNAVAILABLE_MESSAGES.get(
-            result.status, "Reasoning is temporarily unavailable. Please try again later."
-        )
+            message = _NO_PROVIDER_AVAILABLE_MESSAGE
+        else:
+            message = _LLM_UNAVAILABLE_MESSAGES.get(
+                result.status, "Reasoning is temporarily unavailable. Please try again later."
+            )
+        if result is not None and result.spend_stop:
+            # Money ran out (the app's cap, OpenAI credit, or a hard limit): say exactly
+            # that, so it's never mistaken for a passing outage (OPENAI-KEY-RULES.md).
+            message = f"{message}\n\n{result.spend_stop}"
         return AssistantResponse(text=message, used_llm=False)
 
     async def _handle_needs_llm(
